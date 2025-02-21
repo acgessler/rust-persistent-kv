@@ -2,11 +2,10 @@
 //!
 //! Persistence is achieved via
 //!  - full snapshots that are periodically written to disk
-//!  - write-ahead log to capture recent additions.
+//!  - write-ahead log (WAL) to capture recent additions
 //!
 //! Both are identical on-disk formats except that snapshots contain unique
-//! key-value pairs only but write logs may contain multiple entries
-//! for the same key.
+//! key-value pairs only but WAL may contain repeat entries.
 use std::{
     collections::HashMap,
     hash::{ DefaultHasher, Hash, Hasher },
@@ -15,6 +14,7 @@ use std::{
 };
 
 mod snapshots;
+mod snapshot_set;
 
 struct Bucket {
     data: Arc<RwLock<HashMap<String, String>>>,

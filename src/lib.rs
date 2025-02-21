@@ -8,10 +8,13 @@
 //! key-value pairs only but WAL may contain repeat entries.
 use std::{
     collections::HashMap,
+    error::Error,
     hash::{ DefaultHasher, Hash, Hasher },
     path::Path,
     sync::{ Arc, Mutex, RwLock },
 };
+
+use snapshot_set::SnapshotType;
 
 mod snapshots;
 mod snapshot_set;
@@ -24,11 +27,12 @@ pub struct PersistentKeyValueStore {
     bucket_count: u32,
     data: Vec<Bucket>,
     wal: Mutex<snapshots::SnapshotWriter>,
+    snapshot_set: snapshot_set::SnapshotSet,
 }
 
 impl PersistentKeyValueStore {
     const DEFAULT_BUCKET_COUNT: u32 = 16;
-    pub fn new(path: &Path, bucket_count: Option<u32>) -> Self {
+    pub fn new(path: &Path, bucket_count: Option<u32>) -> Result<Self, Box<dyn Error>> {
         let bucket_count = bucket_count.unwrap_or(PersistentKeyValueStore::DEFAULT_BUCKET_COUNT);
         let mut data = Vec::with_capacity(bucket_count as usize);
         for _ in 0..bucket_count {
@@ -36,26 +40,39 @@ impl PersistentKeyValueStore {
                 data: RwLock::new(HashMap::new()).into(),
             });
         }
-        let wal_path = path.join("wal.bin");
+        let mut snapshot_set = snapshot_set::SnapshotSet::new(path)?;
+        let wal_path = &snapshot_set.register_new_snapshot_path(SnapshotType::Diff)?;
+        let wal = Mutex::new(snapshots::SnapshotWriter::new(wal_path, true));
         let self_ = Self {
             bucket_count,
             data,
-            wal: Mutex::new(snapshots::SnapshotWriter::new(&wal_path, true)),
+            snapshot_set,
+            wal,
         };
-        snapshots::SnapshotReader
-            ::new(&wal_path)
-            .read_entries(|entry| {
-                let bucket = self_.get_bucket(&entry.key);
-                let mut data = bucket.data.write().unwrap();
+        let last_snapshot_ordinal = match self_.snapshot_set.get_latest_full_snapshot() {
+            Some(snapshot) => snapshot.ordinal,
+            None => 0,
+        };
+        for snapshot_path in self_.snapshot_set.get_all_diff_snapshots_since(
+            last_snapshot_ordinal
+        ) {
+            snapshots::SnapshotReader
+                ::new(&snapshot_path.path)
+                .read_entries(|entry| {
+                    let bucket = self_.get_bucket(&entry.key);
+                    let mut data = bucket.data.write().unwrap();
 
-                if entry.value.is_empty() {
-                    data.remove(&entry.key);
-                } else {
-                    data.insert(entry.key, String::from_utf8(entry.value).unwrap());
-                }
-            })
-            .expect("Failed to read write-ahead log");
-        self_
+                    if entry.value.is_empty() {
+                        data.remove(&entry.key);
+                    } else {
+                        data.insert(entry.key, String::from_utf8(entry.value).unwrap());
+                    }
+                })
+                .expect(
+                    format!("Failed to read write-ahead log snapshot: {:?}", snapshot_path).as_str()
+                );
+        }
+        Ok(self_)
     }
 
     pub fn set(&self, key: impl Into<String>, value: impl Into<String>) {
@@ -123,14 +140,14 @@ mod tests {
     fn basic_setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             store.set("foo", "1");
             store.set("bar", "2");
             assert_eq!(store.get("foo"), Some(String::from("1")));
             assert_eq!(store.get("bar"), Some(String::from("2")));
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             assert_eq!(store2.get("foo"), Some(String::from("1")));
             assert_eq!(store2.get("bar"), Some(String::from("2")));
         }
@@ -140,12 +157,12 @@ mod tests {
     fn basic_get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             store.set("foo", "1");
             assert_eq!(store.get("bar"), None);
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             assert_eq!(store2.get("bar"), None);
         }
     }
@@ -154,7 +171,7 @@ mod tests {
     fn basic_set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             store.set("foo", "1");
             store.set("bar", "2");
             assert_eq!(store.get("foo"), Some(String::from("1")));
@@ -164,7 +181,7 @@ mod tests {
             assert_eq!(store.get("bar"), Some(String::from("3")));
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             assert_eq!(store2.get("foo"), Some(String::from("1")));
             assert_eq!(store2.get("bar"), Some(String::from("3")));
         }
@@ -174,14 +191,14 @@ mod tests {
     fn basic_unset() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             store.set("foo", "1");
             assert_eq!(store.get("foo"), Some(String::from("1")));
             store.unset("foo");
             assert_eq!(store.get("foo"), None);
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None);
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
             assert_eq!(store2.get("foo"), None);
         }
     }

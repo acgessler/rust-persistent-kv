@@ -36,6 +36,9 @@ pub struct SnapshotInfo {
 ///
 /// <ordinal> is used to determine the order of snapshots independent of file
 /// system modification times which could be tampered with.
+/// 
+/// TODO(acgessler): Add file based lock to prevent accidental construction of
+/// multiple SnapshotSet instances for the same folder.
 #[derive(Debug)]
 pub struct SnapshotSet {
     pub snapshots: Vec<SnapshotInfo>,

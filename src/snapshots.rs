@@ -1,4 +1,3 @@
-// Add the necessary imports
 use prost::Message;
 use std::fs::File;
 use std::fs::OpenOptions;

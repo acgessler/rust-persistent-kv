@@ -36,7 +36,7 @@ pub struct SnapshotInfo {
 ///
 /// <ordinal> is used to determine the order of snapshots independent of file
 /// system modification times which could be tampered with.
-/// 
+///
 /// TODO(acgessler): Add file based lock to prevent accidental construction of
 /// multiple SnapshotSet instances for the same folder.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ impl SnapshotSet {
         for entry in fs::read_dir(folder).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if let Some((ordinal, snapshot_type)) = Self::parse_snapshot_filename(&path) {
+            if let Some((ordinal, snapshot_type)) = Self::parse_snapshot_filename_(&path) {
                 snapshots.push(SnapshotInfo {
                     snapshot_type,
                     ordinal,
@@ -62,7 +62,10 @@ impl SnapshotSet {
         }
 
         // Verify all ordinals are unique.
-        let mut ordinals = snapshots.iter().map(|snapshot| snapshot.ordinal).collect::<Vec<_>>();
+        let mut ordinals = snapshots
+            .iter()
+            .map(|snapshot| snapshot.ordinal)
+            .collect::<Vec<_>>();
         ordinals.sort();
         ordinals.dedup();
         if ordinals.len() != snapshots.len() {
@@ -79,20 +82,45 @@ impl SnapshotSet {
     /// This will return a new snapshot path that can be used to write the snapshot to.
     /// The new snapshot will have a ordinal higher than all previous snapshots.
     /// The file will be created with empty contents.
-    pub fn register_new_snapshot_path(
+    pub fn register_snapshot_path(
         &mut self,
         snapshot_type: SnapshotType
     ) -> Result<PathBuf, io::Error> {
-        let ordinal = self.get_next_ordinal_number();
-        let filename = Self::generate_snapshot_filename(ordinal, snapshot_type);
-        let path = self.folder.join(Path::new(&filename));
-        File::create_new(path.clone())?;
-        self.snapshots.push(SnapshotInfo {
-            path: path.clone(),
-            snapshot_type,
-            ordinal,
-        });
-        Ok(path)
+        match snapshot_type {
+            SnapshotType::Diff => {
+                // Append to latest existing diff snapshot, provided there is no full snapshot
+                // (completed or pending) that came after it.
+                let latest_diff_snapshot = self.snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.snapshot_type == SnapshotType::Diff)
+                    .max_by_key(|snapshot| snapshot.ordinal);
+                let latest_full_snapshot = self.get_latest_full_snapshot();
+
+                match (latest_diff_snapshot, latest_full_snapshot) {
+                    (Some(latest_diff_snapshot), Some(latest_full_snapshot)) if
+                        latest_full_snapshot.ordinal < latest_diff_snapshot.ordinal
+                    => {
+                        return Ok(latest_diff_snapshot.path.clone());
+                    }
+                    (Some(latest_diff_snapshot), None) => {
+                        return Ok(latest_diff_snapshot.path.clone());
+                    }
+                    _ => (),
+                }
+                self.create_new_snapshot_file_(snapshot_type)
+            }
+            SnapshotType::FullCompleted => {
+                return Err(
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Cannot create completed snapshot directly"
+                    )
+                );
+            }
+            SnapshotType::Pending => {
+                self.create_new_snapshot_file_(snapshot_type)
+            }
+        }
     }
 
     pub fn get_latest_full_snapshot(&self) -> Option<&SnapshotInfo> {
@@ -160,7 +188,21 @@ impl SnapshotSet {
         Ok(())
     }
 
-    fn get_next_ordinal_number(&self) -> u64 {
+    fn create_new_snapshot_file_(&mut self, snapshot_type: SnapshotType) -> Result<PathBuf, io::Error> {
+        
+        let ordinal = self.get_next_ordinal_number_();
+        let filename = Self::generate_snapshot_filename_(ordinal, snapshot_type);
+        let path = self.folder.join(Path::new(&filename));
+        File::create_new(path.clone())?;
+        self.snapshots.push(SnapshotInfo {
+            path: path.clone(),
+            snapshot_type,
+            ordinal,
+        });
+        Ok(path)
+    }
+
+    fn get_next_ordinal_number_(&self) -> u64 {
         self.snapshots
             .iter()
             .map(|snapshot| snapshot.ordinal)
@@ -168,7 +210,7 @@ impl SnapshotSet {
             .unwrap_or(0) + 1
     }
 
-    fn generate_snapshot_filename(ordinal: u64, snapshot_type: SnapshotType) -> String {
+    fn generate_snapshot_filename_(ordinal: u64, snapshot_type: SnapshotType) -> String {
         let snapshot_type_str = match snapshot_type {
             SnapshotType::Diff => "diff",
             SnapshotType::FullCompleted => "full",
@@ -177,7 +219,7 @@ impl SnapshotSet {
         format!("snapshot_{}_{}.bin", ordinal, snapshot_type_str)
     }
 
-    fn parse_snapshot_filename(path: &Path) -> Option<(u64, SnapshotType)> {
+    fn parse_snapshot_filename_(path: &Path) -> Option<(u64, SnapshotType)> {
         let filename = path.file_name().unwrap().to_str().unwrap();
         let re = Regex::new(r"^snapshot_(\d+)_(diff|full|pending)\.bin$").unwrap();
         let captures = re.captures(filename)?;
@@ -262,15 +304,15 @@ mod tests {
     }
 
     #[test]
-    fn registers_new_snapshot_path() {
+    fn registers_new_snapshot_path_assigns_new_snapshot_ordinals() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin"); /// Will not be re-used
         create_snapshot_file(&tmp_dir.path(), "snapshot_60_full.bin");
         create_snapshot_file(&tmp_dir.path(), "snapshot_900000000000_pending.bin");
 
         let mut snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
         let new_diff_snapshot_path = snapshot_set
-            .register_new_snapshot_path(SnapshotType::Diff)
+            .register_snapshot_path(SnapshotType::Diff)
             .unwrap();
 
         assert_eq!(
@@ -279,7 +321,7 @@ mod tests {
         );
 
         let new_diff_snapshot_path = snapshot_set
-            .register_new_snapshot_path(SnapshotType::Pending)
+            .register_snapshot_path(SnapshotType::Pending)
             .unwrap();
 
         assert_eq!(
@@ -295,18 +337,40 @@ mod tests {
     }
 
     #[test]
+    fn registers_new_snapshot_path_reuses_most_recent_diff_ordinal() {
+        let tmp_dir = create_temp_dir();
+        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_2_diff.bin");
+
+        let mut snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
+        let new_diff_snapshot_path = snapshot_set
+            .register_snapshot_path(SnapshotType::Diff)
+            .unwrap();
+
+        assert_eq!(
+            new_diff_snapshot_path,
+            tmp_dir.path().join(PathBuf::from("snapshot_2_diff.bin"))
+        );
+
+        // Construct a new SnapShotSet to verify that no new files were created on disk
+        snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
+        assert_eq!(snapshot_set.snapshots.len(), 3);
+    }
+
+    #[test]
     fn registers_new_snapshot_path_from_empty() {
         let tmp_dir = create_temp_dir();
 
         let mut snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
         let new_diff_snapshot_path = snapshot_set
-            .register_new_snapshot_path(SnapshotType::Pending)
+            .register_snapshot_path(SnapshotType::Diff)
             .unwrap();
 
         // First ordinal number assigned is 1.
         assert_eq!(
             new_diff_snapshot_path,
-            tmp_dir.path().join(PathBuf::from("snapshot_1_pending.bin"))
+            tmp_dir.path().join(PathBuf::from("snapshot_1_diff.bin"))
         );
     }
 
@@ -319,9 +383,21 @@ mod tests {
         create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
 
         let error = snapshot_set
-            .register_new_snapshot_path(SnapshotType::Diff)
+            .register_snapshot_path(SnapshotType::Diff)
             .map_err(|e| e.kind());
         assert_eq!(error, Err(io::ErrorKind::AlreadyExists));
+    }
+
+    #[test]
+    fn registers_new_snapshot_path_rejects_full_completed_type() {
+        let tmp_dir = create_temp_dir();
+
+        let mut snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
+
+        let error = snapshot_set
+            .register_snapshot_path(SnapshotType::FullCompleted)
+            .map_err(|e| e.kind());
+        assert_eq!(error, Err(io::ErrorKind::InvalidInput));
     }
 
     #[test]

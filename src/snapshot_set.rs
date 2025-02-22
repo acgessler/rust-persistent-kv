@@ -79,9 +79,10 @@ impl SnapshotSet {
     }
 
     /// Registers a new snapshot path with the given snapshot type.
-    /// This will return a new snapshot path that can be used to write the snapshot to.
-    /// The new snapshot will have a ordinal higher than all previous snapshots.
-    /// The file will be created with empty contents.
+    /// This will return a new snapshot path that can be used to write the snapshot to,
+    /// which may be a snapshot file that already exists and that we should append to.
+    /// A new snapshot file will have a ordinal higher than all previous snapshots and
+    /// the file will be created with empty contents.
     pub fn register_snapshot_path(
         &mut self,
         snapshot_type: SnapshotType
@@ -123,6 +124,22 @@ impl SnapshotSet {
         }
     }
 
+    /// Returns all snapshots that need to be restored in order to get the latest state.
+    /// This includes the latest full snapshot and all differential snapshots since then.
+    pub fn get_snapshots_to_restore(&self) -> Vec<&SnapshotInfo> {
+        let mut snapshots_to_restore = Vec::new();
+        let last_snapshot_ordinal = match self.get_latest_full_snapshot() {
+            Some(snapshot) => {
+                snapshots_to_restore.push(snapshot);
+                snapshot.ordinal
+            }
+            None => 0,
+        };
+        snapshots_to_restore.append(&mut self.get_all_diff_snapshots_since(last_snapshot_ordinal));
+        snapshots_to_restore
+    }
+
+    /// Returns the latest full snapshot that has been published and is considered complete.
     pub fn get_latest_full_snapshot(&self) -> Option<&SnapshotInfo> {
         self.snapshots
             .iter()
@@ -130,7 +147,7 @@ impl SnapshotSet {
             .max_by_key(|snapshot| snapshot.ordinal)
     }
 
-    /// Returns all differential snapshots that have been created since the full snapshot
+    /// Returns all differential snapshots that have been created since the snapshot
     /// with the given ordinal number. This is useful to determine which differential snapshots
     /// need to be applied to the full snapshot to get the latest state.
     pub fn get_all_diff_snapshots_since(&self, last_full_ordinal: u64) -> Vec<&SnapshotInfo> {
@@ -417,11 +434,11 @@ mod tests {
     #[test]
     fn gets_all_diff_snapshots_since() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_3_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_4_full.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_5_diff.bin");
         create_snapshot_file(&tmp_dir.path(), "snapshot_9999_diff.bin");
 
         let snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
@@ -431,9 +448,28 @@ mod tests {
         );
 
         assert_eq!(diff_snapshots.len(), 2);
-        assert_eq!(diff_snapshots[0].ordinal, 4);
+        assert_eq!(diff_snapshots[0].ordinal, 5);
         assert_eq!(diff_snapshots[1].ordinal, 9999);
     }
+
+    #[test]
+    fn gets_snapshots_to_restore() {
+        let tmp_dir = create_temp_dir();
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_3_diff.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_4_pending.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_5_diff.bin");
+
+        let snapshot_set = SnapshotSet::new(tmp_dir.path()).unwrap();
+        let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
+
+        assert_eq!(snapshots_to_restore.len(), 3);
+        assert_eq!(snapshots_to_restore[0].ordinal, 2);
+        assert_eq!(snapshots_to_restore[1].ordinal, 3);
+        assert_eq!(snapshots_to_restore[2].ordinal, 5);
+    }
+
 
     #[test]
     fn prunes_backup_snapshots() {

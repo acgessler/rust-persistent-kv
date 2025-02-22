@@ -26,7 +26,7 @@ struct Bucket {
 pub struct PersistentKeyValueStore {
     bucket_count: u32,
     data: Vec<Bucket>,
-    wal: Mutex<snapshots::SnapshotWriter>,
+    wal: Arc<Mutex<snapshots::SnapshotWriter>>,
     snapshot_set: snapshot_set::SnapshotSet,
 }
 
@@ -41,21 +41,20 @@ impl PersistentKeyValueStore {
             });
         }
         let mut snapshot_set = snapshot_set::SnapshotSet::new(path)?;
-        let wal_path = &snapshot_set.register_new_snapshot_path(SnapshotType::Diff)?;
-        let wal = Mutex::new(snapshots::SnapshotWriter::new(wal_path, true));
+
+        // Construct instance, imbuing it with a write-ahead log to persist new entries.
+        let wal_path = &snapshot_set.register_snapshot_path(SnapshotType::Diff)?;
         let self_ = Self {
             bucket_count,
             data,
             snapshot_set,
-            wal,
+            wal: Mutex::new(snapshots::SnapshotWriter::new(wal_path, true)).into()
         };
-        let last_snapshot_ordinal = match self_.snapshot_set.get_latest_full_snapshot() {
-            Some(snapshot) => snapshot.ordinal,
-            None => 0,
-        };
-        for snapshot_path in self_.snapshot_set.get_all_diff_snapshots_since(
-            last_snapshot_ordinal
-        ) {
+
+        // Restore state from past snapshots. This will read the last full snapshot,
+        // if available, and then replay all write-ahead log entries since that snapshot.
+        let snapshots_to_restore = self_.snapshot_set.get_snapshots_to_restore();  
+        for snapshot_path in snapshots_to_restore {
             snapshots::SnapshotReader
                 ::new(&snapshot_path.path)
                 .read_entries(|entry| {

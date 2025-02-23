@@ -14,7 +14,7 @@ use std::{
     sync::{ atomic::AtomicU64, Arc, Mutex, MutexGuard, RwLock },
 };
 
-use snapshot_set::{ SnapshotInfo, SnapshotType };
+use snapshot_set::{ SnapshotInfo, SnapshotSet, SnapshotType };
 
 mod snapshots;
 mod snapshot_set;
@@ -27,7 +27,7 @@ pub struct PersistentKeyValueStore {
     bucket_count: u32,
     data: Vec<Bucket>, // TODO: cache
     wal: Arc<Mutex<snapshots::SnapshotWriter>>,
-    snapshot_set: Arc<Mutex<snapshot_set::SnapshotSet>>,
+    snapshot_set: Arc<Mutex<Box<dyn snapshot_set::SnapshotSet>>>,
     update_counter: AtomicU64,
     full_snapshot_writer_thread: Option<std::thread::JoinHandle<()>>,
     full_snapshot_writer_sender: Option<std::sync::mpsc::Sender<SnapshotTask>>,
@@ -50,6 +50,16 @@ impl PersistentKeyValueStore {
     const UPDATE_THRESHOLD: u64 = 1000; // TODO(acgessler): make configurable
 
     pub fn new(path: &Path, bucket_count: Option<u32>) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_snapshot_set(
+            Box::new(snapshot_set::FileSnapshotSet::new(path)?),
+            bucket_count
+        )
+    }
+
+    pub fn new_with_snapshot_set(
+        mut snapshot_set: Box<dyn SnapshotSet>,
+        bucket_count: Option<u32>
+    ) -> Result<Self, Box<dyn Error>> {
         let bucket_count = bucket_count.unwrap_or(PersistentKeyValueStore::DEFAULT_BUCKET_COUNT);
         let mut data = Vec::with_capacity(bucket_count as usize);
         for _ in 0..bucket_count {
@@ -57,7 +67,6 @@ impl PersistentKeyValueStore {
                 data: RwLock::new(HashMap::new()).into(),
             });
         }
-        let mut snapshot_set = snapshot_set::SnapshotSet::new(path)?;
 
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
         let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, true)?;
@@ -122,14 +131,16 @@ impl PersistentKeyValueStore {
                                 &snapshot_task.snapshot.path,
                                 false
                             );
-                            for (key, value) in snapshot_task.data_copy.iter() {
+                            for (key, value) in snapshot_task.data_copy.into_iter() {
                                 writer
-                                    .append_entry(Self::make_snapshot_entry(key, Some(value)))
+                                    .append_entry(Self::make_snapshot_entry(key, Some(&value)))
                                     .expect("Failed to write full snapshot entry to disk");
                             }
-                            snapshot_set.lock().unwrap().publish_completed_snapshot(
-                                snapshot_task.snapshot.ordinal
-                            ).unwrap();
+                            snapshot_set
+                                .lock()
+                                .unwrap()
+                                .publish_completed_snapshot(snapshot_task.snapshot.ordinal)
+                                .unwrap();
                             // TODO(acgessler): prune now obsolete write ahead logs.
                         }
                     }
@@ -147,7 +158,7 @@ impl PersistentKeyValueStore {
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistently ordered.
         let mut wal = self.wal.lock().unwrap();
-        wal.append_entry(Self::make_snapshot_entry(&key, Some(&value))).expect(
+        wal.append_entry(Self::make_snapshot_entry(key.clone(), Some(&value))).expect(
             "Failed to write set op to write-ahead log"
         );
         self.maybe_trigger_full_snapshot(&mut wal);
@@ -165,7 +176,7 @@ impl PersistentKeyValueStore {
 
         // See notes on lock usage in set()
         let mut wal = self.wal.lock().unwrap();
-        wal.append_entry(Self::make_snapshot_entry(&key, None)).expect(
+        wal.append_entry(Self::make_snapshot_entry(key.clone(), None)).expect(
             "Failed to write unset op to write-ahead log"
         );
         self.maybe_trigger_full_snapshot(&mut wal);
@@ -192,9 +203,10 @@ impl PersistentKeyValueStore {
 
     fn maybe_trigger_full_snapshot(&self, wal: &mut MutexGuard<snapshots::SnapshotWriter>) {
         // If reaching update threshold, trigger full snapshot write.
-        // - Allocate the snapshot immediately and make a copy of all data.
-        // - Instantly switch to a new WAL.
-        // - Signal the offline thread to carry out the snapshot.
+        // - Allocate the snapshot in a pending state.
+        // - Instantly switch to a new WAL file with ordinal higher than the pending snapshot
+        //   so concurrent writes can continue and will later be applied against this snapshot
+        // - Signal the offline thread to carry out the snapshot, making a copy of the data.
         if
             (self.update_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) %
                 Self::UPDATE_THRESHOLD == 0
@@ -222,9 +234,9 @@ impl PersistentKeyValueStore {
         }
     }
 
-    fn make_snapshot_entry(key: &str, value: Option<&str>) -> snapshots::SnapshotEntry {
+    fn make_snapshot_entry(key: String, value: Option<&str>) -> snapshots::SnapshotEntry {
         snapshots::SnapshotEntry {
-            key: key.to_string(),
+            key: key,
             value: value.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
         }
     }

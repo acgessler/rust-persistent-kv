@@ -136,12 +136,12 @@ impl PersistentKeyValueStore {
                                     .append_entry(Self::make_snapshot_entry(key, Some(&value)))
                                     .expect("Failed to write full snapshot entry to disk");
                             }
+                            // TODO: verify that the snapshot was written correctly before publishing.
                             snapshot_set
                                 .lock()
                                 .unwrap()
-                                .publish_completed_snapshot(snapshot_task.snapshot.ordinal)
+                                .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true)
                                 .unwrap();
-                            // TODO(acgessler): prune now obsolete write ahead logs.
                         }
                     }
                 }

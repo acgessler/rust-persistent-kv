@@ -15,6 +15,8 @@ pub enum SnapshotType {
     Pending,
 }
 
+type SnapshotOrdinal = u64;
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct SnapshotInfo {
     pub snapshot_type: SnapshotType,
@@ -40,7 +42,7 @@ pub struct SnapshotInfo {
 /// TODO(acgessler): Add file based lock to prevent accidental construction of
 /// multiple SnapshotSet instances for the same folder.
 ///
-pub trait SnapshotSet : Send {
+pub trait SnapshotSet: Send {
     /// Registers a new snapshot path usable for the given snapshot type.
     /// This will return a new snapshot path that can be used to write the snapshot to.
     ///
@@ -57,9 +59,12 @@ pub trait SnapshotSet : Send {
 
     /// Publishes a pending snapshot as a full snapshot. This will rename the snapshot file
     /// to indicate that it is a full snapshot and considered complete.
+    /// `purge_obsolete_diff_snapshots` specifies if differential snapshots that
+    /// are now obsolete should be auto-deleted.
     fn publish_completed_snapshot(
         &mut self,
-        pending_snapshot_ordinal: u64
+        pending_snapshot_ordinal: SnapshotOrdinal,
+        purge_obsolete_diff_snapshots: bool
     ) -> Result<(), io::Error>;
 
     /// Returns all snapshots that need to be restored in order to get the latest state.
@@ -67,23 +72,18 @@ pub trait SnapshotSet : Send {
     fn get_snapshots_to_restore(&self) -> Vec<&SnapshotInfo>;
 }
 
-
 /// Admin operations for a snapshot set, e.g. pruning snapshots.
-pub trait SnapshotSetAdmin : Send {
+pub trait SnapshotSetAdmin: Send {
     /// Prunes backup snapshots, keeping only the latest `max_backups_keep` full snapshots.
     /// This is useful to limit the number of backup snapshots that are kept around.
     /// __Warning__: This will delete files from the file system.
-    fn prune_backup_snapshots(
-        &mut self,
-        max_backups_keep: usize
-    ) -> Result<(), std::io::Error>;
+    fn prune_backup_snapshots(&mut self, max_backups_keep: usize) -> Result<(), std::io::Error>;
 
     /// Prunes snapshots that are not completed, e.g. due to a power failure or process panic.
     /// This is useful to clean up incomplete snapshots that should not be used.
     /// __Warning__: This will delete files from the file system.
     fn prune_not_completed_snapshots(&mut self) -> Result<(), std::io::Error>;
 }
-
 
 #[derive(Debug)]
 pub struct FileSnapshotSet {
@@ -129,12 +129,16 @@ impl SnapshotSet for FileSnapshotSet {
 
     fn publish_completed_snapshot(
         &mut self,
-        pending_snapshot_ordinal: u64
+        pending_snapshot_ordinal: SnapshotOrdinal,
+        purge_obsolete_diff_snapshots: bool
     ) -> Result<(), io::Error> {
         let pending_snapshot = self.snapshots
             .iter_mut()
             .find(|snapshot| snapshot.ordinal == pending_snapshot_ordinal)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Snapshot not found"))?;
+        if pending_snapshot.snapshot_type != SnapshotType::Pending {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Snapshot is not pending"));
+        }
         let new_snapshot_path = Self::generate_snapshot_filename_(
             pending_snapshot.ordinal,
             SnapshotType::FullCompleted
@@ -143,6 +147,22 @@ impl SnapshotSet for FileSnapshotSet {
         fs::rename(&pending_snapshot.path, &new_snapshot_path)?;
         pending_snapshot.path = new_snapshot_path;
         pending_snapshot.snapshot_type = SnapshotType::FullCompleted;
+
+        if purge_obsolete_diff_snapshots {
+            let obsolete_diffs: Vec<_> = self.snapshots
+                .iter()
+                .filter(
+                    |snapshot|
+                        snapshot.snapshot_type == SnapshotType::Diff &&
+                        snapshot.ordinal < pending_snapshot_ordinal
+                )
+                .cloned()
+                .collect();
+            for obsolete_diff in obsolete_diffs {
+                fs::remove_file(&obsolete_diff.path)?;
+                self.snapshots.retain(|s| s.path != obsolete_diff.path);
+            }
+        }
         Ok(())
     }
 
@@ -161,11 +181,7 @@ impl SnapshotSet for FileSnapshotSet {
 }
 
 impl SnapshotSetAdmin for FileSnapshotSet {
-
-    fn prune_backup_snapshots(
-        &mut self,
-        max_backups_keep: usize
-    ) -> Result<(), std::io::Error> {
+    fn prune_backup_snapshots(&mut self, max_backups_keep: usize) -> Result<(), std::io::Error> {
         let mut full_backup_snapshots = self.snapshots
             .iter()
             .filter(|snapshot| snapshot.snapshot_type == SnapshotType::FullCompleted)
@@ -506,6 +522,53 @@ mod tests {
         assert_eq!(diff_snapshots.len(), 2);
         assert_eq!(diff_snapshots[0].ordinal, 5);
         assert_eq!(diff_snapshots[1].ordinal, 9999);
+    }
+
+    #[test]
+    fn publishes_completed_snapshot() {
+        let tmp_dir = create_temp_dir();
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin"); // Incorporated into snapshot
+        create_snapshot_file(&tmp_dir.path(), "snapshot_2_diff.bin"); // Incorporated into snapshot
+        create_snapshot_file(&tmp_dir.path(), "snapshot_3_pending.bin");
+        create_snapshot_file(&tmp_dir.path(), "snapshot_4_diff.bin"); // Created after snapshot cut-off
+        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+
+        snapshot_set.publish_completed_snapshot(3, true).unwrap();
+
+        // Verify that the existing snapshot set reflects the correct change.
+        assert_eq!(snapshot_set.snapshots.len(), 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+
+        // Construct a new SnapShotSet to verify that the file changes actually hit disk.
+        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        assert_eq!(snapshot_set.snapshots.len(), 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+    }
+
+    #[test]
+    fn publishes_completed_snapshot_already_published() {
+        let tmp_dir = create_temp_dir();
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+
+        let error = snapshot_set.publish_completed_snapshot(1, true).map_err(|e| e.kind());
+
+        assert_eq!(error, Err(io::ErrorKind::AlreadyExists));
+    }
+
+    #[test]
+    fn publishes_completed_snapshot_not_found() {
+        let tmp_dir = create_temp_dir();
+        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+
+        let error = snapshot_set.publish_completed_snapshot(2, true).map_err(|e| e.kind());
+
+        assert_eq!(error, Err(io::ErrorKind::NotFound));
     }
 
     #[test]

@@ -1,4 +1,6 @@
-pub struct Config {
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Config  {
     /// The interval at which full snapshots should be created. The unit counted is the
     /// number of key-value pairs modified (created, updated or deleted) meaning if
     /// `snapshot_interval` is 10,000, then a snapshot will be created every 10,000

@@ -48,8 +48,6 @@ impl Drop for PersistentKeyValueStore {
 }
 
 impl PersistentKeyValueStore {
-    const UPDATE_THRESHOLD: u64 = 1000; // TODO(acgessler): make configurable
-
     pub fn new(path: &Path, config: Config) -> Result<Self, Box<dyn Error>> {
         Self::new_with_snapshot_set(Box::new(snapshot_set::FileSnapshotSet::new(path)?), config)
     }
@@ -129,6 +127,7 @@ impl PersistentKeyValueStore {
                                 false
                             );
                             for (key, value) in snapshot_task.data_copy.into_iter() {
+                                println!("snapshot ke {}", key);
                                 writer
                                     .append_entry(Self::make_snapshot_entry(key, Some(&value)))
                                     .expect("Failed to write full snapshot entry to disk");
@@ -139,6 +138,10 @@ impl PersistentKeyValueStore {
                                 .unwrap()
                                 .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true)
                                 .unwrap();
+                            println!(
+                                "PersistentKeyValueStore: published snapshot with ID {}",
+                                snapshot_task.snapshot.ordinal
+                            );
                         }
                     }
                 }
@@ -148,23 +151,33 @@ impl PersistentKeyValueStore {
         Ok(self_)
     }
 
-    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    pub fn set(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>
+    ) -> &mut PersistentKeyValueStore {
         let key = key.into();
         let value = value.into();
 
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistently ordered.
-        let mut wal = self.wal.lock().unwrap();
-        wal.append_entry(Self::make_snapshot_entry(key.clone(), Some(&value))).expect(
-            "Failed to write set op to write-ahead log"
-        );
-        self.maybe_trigger_full_snapshot(&mut wal);
+        {
+            let mut wal = self.wal.lock().unwrap();
+            wal.append_entry(Self::make_snapshot_entry(key.clone(), Some(&value))).expect(
+                "Failed to write set op to write-ahead log"
+            );
 
-        // Hold shorter lock on in-memory bucket to avoid blocking concurrent
-        // readers on the full I/O operation.
-        let bucket = self.get_bucket(&key);
-        let mut data = bucket.data.write().unwrap();
-        data.insert(key, value);
+            // Hold shorter lock on in-memory bucket to avoid blocking concurrent
+            // readers on the full I/O operation.
+            {
+                let bucket = self.get_bucket(&key);
+                let mut data = bucket.data.write().unwrap();
+                data.insert(key, value);
+            }
+
+            self.maybe_trigger_full_snapshot(&mut wal);
+        }
+        self
     }
 
     pub fn unset(&mut self, key: impl Into<String>) {
@@ -176,9 +189,12 @@ impl PersistentKeyValueStore {
         wal.append_entry(Self::make_snapshot_entry(key.clone(), None)).expect(
             "Failed to write unset op to write-ahead log"
         );
+        {
+            let mut data = bucket.data.write().unwrap();
+            data.remove(&key);
+        }
+
         self.maybe_trigger_full_snapshot(&mut wal);
-        let mut data = bucket.data.write().unwrap();
-        data.remove(&key);
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
@@ -241,11 +257,18 @@ impl PersistentKeyValueStore {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::path;
+
     use super::*;
     use tempfile::TempDir;
 
+    fn file_length_in_bytes(path: &Path) -> u64 {
+        File::open(path).unwrap().metadata().unwrap().len()
+    }
+
     #[test]
-    fn basic_setget() {
+    fn setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
             let mut store = PersistentKeyValueStore::new(
@@ -265,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_get_nonexisting() {
+    fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
             let mut store = PersistentKeyValueStore::new(
@@ -282,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_set_overwrite() {
+    fn set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
             let mut store = PersistentKeyValueStore::new(
@@ -305,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_unset() {
+    fn unset() {
         let tmp_dir = TempDir::new().unwrap();
         {
             let mut store = PersistentKeyValueStore::new(
@@ -321,5 +344,57 @@ mod tests {
             let store2 = PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
             assert_eq!(store2.get("foo"), None);
         }
+    }
+
+    #[test]
+    fn creates_snapshot_has_expected_filesnapshotset() {
+        let tmp_dir = TempDir::new().unwrap();
+
+        // Create a store and set one key to trigger a snapshot.
+        let mut config = Config::default();
+        config.snapshot_interval = 1;
+        PersistentKeyValueStore::new(tmp_dir.path(), config.clone()).unwrap().set("foo", "1");
+
+        // Verify existence of snapshot files directly:
+        //  (Ord=1, Diff) used to be the write-ahead log and has been deleted.
+        //  (Ord=2, Full) is the current up to date snapshot.
+        //  (Ord=3, Diff) is the new write-ahead log, which is empty.
+        let snapshot_set = snapshot_set::FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        assert_eq!(snapshot_set.snapshots.len(), 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[1].snapshot_type, SnapshotType::Diff);
+        assert!(
+            File::open(&snapshot_set.snapshots[1].path).unwrap().metadata().unwrap().len() == 0
+        );
+
+        // Create a fresh store instance and make a modification to two more keys (triggers
+        // snapshot) and then delete a third (does not trigger snapshot)
+        let mut config = Config::default();
+        config.snapshot_interval = 2;
+        PersistentKeyValueStore::new(tmp_dir.path(), config.clone())
+            .unwrap()
+            .set("bar", "2")
+            .set("baz", "3")
+            .unset("foo");
+
+        // Verify existence of snapshot files directly again.
+        //  (Ord=2, Full) is the previous snapshot containing key `foo`
+        //  (Ord=4, Full) is the new snapshot containing keys `foo` and `bar` (must be bigger than Ord=2)
+        //  (Ord=5, Diff) is the new write-ahead log which contains the deletion of `foo` (non-empty)
+        let snapshot_set = snapshot_set::FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        assert_eq!(snapshot_set.snapshots.len(), 3);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+        assert_eq!(snapshot_set.snapshots[1].snapshot_type, SnapshotType::FullCompleted);
+        assert_eq!(snapshot_set.snapshots[2].ordinal, 5);
+        assert_eq!(snapshot_set.snapshots[2].snapshot_type, SnapshotType::Diff);
+        assert!(
+            file_length_in_bytes(&snapshot_set.snapshots[0].path) <
+            file_length_in_bytes(&snapshot_set.snapshots[1].path)
+        );
+        assert!(file_length_in_bytes(&snapshot_set.snapshots[2].path) > 0);
     }
 }

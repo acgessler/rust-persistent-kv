@@ -180,21 +180,24 @@ impl PersistentKeyValueStore {
         self
     }
 
-    pub fn unset(&mut self, key: impl Into<String>) {
+    pub fn unset(&mut self, key: impl Into<String>) -> &mut PersistentKeyValueStore {
         let key = key.into();
         let bucket = self.get_bucket(&key);
 
         // See notes on lock usage in set()
-        let mut wal = self.wal.lock().unwrap();
-        wal.append_entry(Self::make_snapshot_entry(key.clone(), None)).expect(
-            "Failed to write unset op to write-ahead log"
-        );
         {
-            let mut data = bucket.data.write().unwrap();
-            data.remove(&key);
-        }
+            let mut wal = self.wal.lock().unwrap();
+            wal.append_entry(Self::make_snapshot_entry(key.clone(), None)).expect(
+                "Failed to write unset op to write-ahead log"
+            );
+            {
+                let mut data = bucket.data.write().unwrap();
+                data.remove(&key);
+            }
 
-        self.maybe_trigger_full_snapshot(&mut wal);
+            self.maybe_trigger_full_snapshot(&mut wal);
+        }
+        self
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
@@ -393,7 +396,7 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[2].snapshot_type, SnapshotType::Diff);
         assert!(
             file_length_in_bytes(&snapshot_set.snapshots[0].path) <
-            file_length_in_bytes(&snapshot_set.snapshots[1].path)
+                file_length_in_bytes(&snapshot_set.snapshots[1].path)
         );
         assert!(file_length_in_bytes(&snapshot_set.snapshots[2].path) > 0);
     }

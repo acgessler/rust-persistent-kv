@@ -14,17 +14,19 @@ use std::{
     sync::{ atomic::AtomicU64, Arc, Mutex, MutexGuard, RwLock },
 };
 
+use config::Config;
 use snapshot_set::{ SnapshotInfo, SnapshotSet, SnapshotType };
 
 mod snapshots;
 mod snapshot_set;
+mod config;
 
 struct Bucket {
     data: Arc<RwLock<HashMap<String, String>>>,
 }
 
 pub struct PersistentKeyValueStore {
-    bucket_count: u32,
+    config: Config,
     data: Vec<Bucket>, // TODO: cache
     wal: Arc<Mutex<snapshots::SnapshotWriter>>,
     snapshot_set: Arc<Mutex<Box<dyn snapshot_set::SnapshotSet>>>,
@@ -46,23 +48,18 @@ impl Drop for PersistentKeyValueStore {
 }
 
 impl PersistentKeyValueStore {
-    const DEFAULT_BUCKET_COUNT: u32 = 16;
     const UPDATE_THRESHOLD: u64 = 1000; // TODO(acgessler): make configurable
 
-    pub fn new(path: &Path, bucket_count: Option<u32>) -> Result<Self, Box<dyn Error>> {
-        Self::new_with_snapshot_set(
-            Box::new(snapshot_set::FileSnapshotSet::new(path)?),
-            bucket_count
-        )
+    pub fn new(path: &Path, config: Config) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_snapshot_set(Box::new(snapshot_set::FileSnapshotSet::new(path)?), config)
     }
 
     pub fn new_with_snapshot_set(
         mut snapshot_set: Box<dyn SnapshotSet>,
-        bucket_count: Option<u32>
+        config: Config
     ) -> Result<Self, Box<dyn Error>> {
-        let bucket_count = bucket_count.unwrap_or(PersistentKeyValueStore::DEFAULT_BUCKET_COUNT);
-        let mut data = Vec::with_capacity(bucket_count as usize);
-        for _ in 0..bucket_count {
+        let mut data = Vec::with_capacity(config.memory_bucket_count);
+        for _ in 0..config.memory_bucket_count {
             data.push(Bucket {
                 data: RwLock::new(HashMap::new()).into(),
             });
@@ -71,7 +68,7 @@ impl PersistentKeyValueStore {
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
         let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, true)?;
         let mut self_ = Self {
-            bucket_count,
+            config,
             data,
             snapshot_set: Arc::new(Mutex::new(snapshot_set)),
             wal: Mutex::new(snapshots::SnapshotWriter::new(&wal_path.path, true)).into(),
@@ -191,7 +188,7 @@ impl PersistentKeyValueStore {
 
     fn get_bucket(&self, key: &str) -> &Bucket {
         let hash = PersistentKeyValueStore::hash(key);
-        let index = hash % (self.bucket_count as u64);
+        let index = hash % (self.config.memory_bucket_count as u64);
         &self.data[index as usize]
     }
 
@@ -209,7 +206,7 @@ impl PersistentKeyValueStore {
         // - Signal the offline thread to carry out the snapshot, making a copy of the data.
         if
             (self.update_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) %
-                Self::UPDATE_THRESHOLD == 0
+                self.config.snapshot_interval == 0
         {
             let mut snapshot_set = self.snapshot_set.lock().unwrap();
             let pending_snapshot = snapshot_set
@@ -251,14 +248,17 @@ mod tests {
     fn basic_setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let mut store = PersistentKeyValueStore::new(
+                tmp_dir.path(),
+                Config::default()
+            ).unwrap();
             store.set("foo", "1");
             store.set("bar", "2");
             assert_eq!(store.get("foo"), Some(String::from("1")));
             assert_eq!(store.get("bar"), Some(String::from("2")));
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
             assert_eq!(store2.get("foo"), Some(String::from("1")));
             assert_eq!(store2.get("bar"), Some(String::from("2")));
         }
@@ -268,12 +268,15 @@ mod tests {
     fn basic_get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let mut store = PersistentKeyValueStore::new(
+                tmp_dir.path(),
+                Config::default()
+            ).unwrap();
             store.set("foo", "1");
             assert_eq!(store.get("bar"), None);
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
             assert_eq!(store2.get("bar"), None);
         }
     }
@@ -282,7 +285,10 @@ mod tests {
     fn basic_set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let mut store = PersistentKeyValueStore::new(
+                tmp_dir.path(),
+                Config::default()
+            ).unwrap();
             store.set("foo", "1");
             store.set("bar", "2");
             assert_eq!(store.get("foo"), Some(String::from("1")));
@@ -292,7 +298,7 @@ mod tests {
             assert_eq!(store.get("bar"), Some(String::from("3")));
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
             assert_eq!(store2.get("foo"), Some(String::from("1")));
             assert_eq!(store2.get("bar"), Some(String::from("3")));
         }
@@ -302,14 +308,17 @@ mod tests {
     fn basic_unset() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let mut store = PersistentKeyValueStore::new(
+                tmp_dir.path(),
+                Config::default()
+            ).unwrap();
             store.set("foo", "1");
             assert_eq!(store.get("foo"), Some(String::from("1")));
             store.unset("foo");
             assert_eq!(store.get("foo"), None);
         }
         {
-            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), None).unwrap();
+            let store2 = PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
             assert_eq!(store2.get("foo"), None);
         }
     }

@@ -8,8 +8,8 @@ use std::path::Path;
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SnapshotEntry {
-    #[prost(string, tag = "1")]
-    pub key: String,
+    #[prost(bytes, tag = "1")]
+    pub key: Vec<u8>,
     #[prost(bytes, tag = "2")]
     pub value: Vec<u8>,
 }
@@ -92,10 +92,10 @@ mod tests {
         {
             let mut writer = SnapshotWriter::new(tmp_file.path(), false);
             writer
-                .append_entry(SnapshotEntry { key: "foo".to_string(), value: b"1".to_vec() })
+                .append_entry(SnapshotEntry { key: b"foo".to_vec(), value: b"1".to_vec() })
                 .unwrap();
             writer
-                .append_entry(SnapshotEntry { key: "bar".to_string(), value: b"2".to_vec() })
+                .append_entry(SnapshotEntry { key: b"bar".to_vec(), value: b"2".to_vec() })
                 .unwrap();
         }
         {
@@ -103,9 +103,9 @@ mod tests {
             let entries = reader.read_entries_to_vec().unwrap();
 
             assert_eq!(entries.len(), 2);
-            assert_eq!(entries[0].key, "foo");
+            assert_eq!(entries[0].key, b"foo");
             assert_eq!(entries[0].value, b"1");
-            assert_eq!(entries[1].key, "bar");
+            assert_eq!(entries[1].key, b"bar");
             assert_eq!(entries[1].value, b"2");
         }
     }

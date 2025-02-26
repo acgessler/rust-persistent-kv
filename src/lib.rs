@@ -77,71 +77,25 @@ impl PersistentKeyValueStore {
 
         // Restore state from past snapshots. This will read the last full snapshot,
         // if available, and then replay all write-ahead log entries since that snapshot.
-        {
-            let snapshot_set = self_.snapshot_set.lock().unwrap();
-            let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
-            for snapshot_path in snapshots_to_restore {
-                snapshots::SnapshotReader
-                    ::new(&snapshot_path.path)
-                    .read_entries(|entry| {
-                        let bucket = self_.get_bucket(&entry.key);
-                        let mut data = bucket.data.write().unwrap();
-
-                        if entry.value.is_empty() {
-                            data.remove(&entry.key);
-                        } else {
-                            data.insert(entry.key, String::from_utf8(entry.value).unwrap());
-                        }
-                    })
-                    .expect(
-                        format!(
-                            "Failed to read write-ahead log snapshot: {:?}",
-                            snapshot_path
-                        ).as_str()
-                    );
-            }
-        }
+        self_.restore_from_snapshots_()?;
 
         // Start a thread that periodically writes full snapshots to disk.
-        let (full_snapshot_writer_sender, full_snapshot_writer_receiver) =
-            std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::channel();
         let snapshot_set = self_.snapshot_set.clone();
-        self_.full_snapshot_writer_sender = Some(full_snapshot_writer_sender);
+        self_.full_snapshot_writer_sender = Some(sender);
         self_.full_snapshot_writer_thread = Some(
             std::thread::spawn(move || {
                 loop {
-                    match full_snapshot_writer_receiver.recv() {
+                    match receiver.recv() {
                         Err(_) => {
                             break;
                         }
                         Ok(mut snapshot_task) => {
                             // Skip over any queued snapshots that we're not keeping up with and process the latest only.
-                            while
-                                let Ok(queued_snapshot_task) =
-                                    full_snapshot_writer_receiver.try_recv()
-                            {
+                            while let Ok(queued_snapshot_task) = receiver.try_recv() {
                                 snapshot_task = queued_snapshot_task;
                             }
-                            let mut writer = snapshots::SnapshotWriter::new(
-                                &snapshot_task.snapshot.path,
-                                false
-                            );
-                            for (key, value) in snapshot_task.data_copy.into_iter() {
-                                println!("snapshot ke {}", key);
-                                writer
-                                    .append_entry(Self::make_snapshot_entry(key, Some(&value)))
-                                    .expect("Failed to write full snapshot entry to disk");
-                            }
-                            // TODO: verify that the snapshot was written correctly before publishing.
-                            snapshot_set
-                                .lock()
-                                .unwrap()
-                                .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true)
-                                .unwrap();
-                            println!(
-                                "PersistentKeyValueStore: published snapshot with ID {}",
-                                snapshot_task.snapshot.ordinal
-                            );
+                            Self::write_and_finalize_snapshot_(&*snapshot_set, snapshot_task);
                         }
                     }
                 }
@@ -170,19 +124,19 @@ impl PersistentKeyValueStore {
             // Hold shorter lock on in-memory bucket to avoid blocking concurrent
             // readers on the full I/O operation.
             {
-                let bucket = self.get_bucket(&key);
+                let bucket = self.get_bucket_(&key);
                 let mut data = bucket.data.write().unwrap();
                 data.insert(key, value);
             }
 
-            self.maybe_trigger_full_snapshot(&mut wal);
+            self.maybe_trigger_full_snapshot_(&mut wal);
         }
         self
     }
 
     pub fn unset(&mut self, key: impl Into<String>) -> &mut PersistentKeyValueStore {
         let key = key.into();
-        let bucket = self.get_bucket(&key);
+        let bucket = self.get_bucket_(&key);
 
         // See notes on lock usage in set()
         {
@@ -195,29 +149,52 @@ impl PersistentKeyValueStore {
                 data.remove(&key);
             }
 
-            self.maybe_trigger_full_snapshot(&mut wal);
+            self.maybe_trigger_full_snapshot_(&mut wal);
         }
         self
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        let bucket = self.get_bucket(key);
+        let bucket = self.get_bucket_(key);
         bucket.data.read().unwrap().get(key).cloned()
     }
 
-    fn get_bucket(&self, key: &str) -> &Bucket {
-        let hash = PersistentKeyValueStore::hash(key);
+    fn get_bucket_(&self, key: &str) -> &Bucket {
+        let hash = PersistentKeyValueStore::hash_(key);
         let index = hash % (self.config.memory_bucket_count as u64);
         &self.data[index as usize]
     }
 
-    fn hash(key: &str) -> u64 {
+    fn hash_(key: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish()
     }
 
-    fn maybe_trigger_full_snapshot(&self, wal: &mut MutexGuard<snapshots::SnapshotWriter>) {
+    fn restore_from_snapshots_(&mut self) -> Result<(), Box<dyn Error>> {
+        let snapshot_set = self.snapshot_set.lock().unwrap();
+        let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
+        for snapshot_path in snapshots_to_restore {
+            snapshots::SnapshotReader
+                ::new(&snapshot_path.path)
+                .read_entries(|entry| {
+                    let bucket = self.get_bucket_(&entry.key);
+                    let mut data = bucket.data.write().unwrap();
+
+                    if entry.value.is_empty() {
+                        data.remove(&entry.key);
+                    } else {
+                        data.insert(entry.key, String::from_utf8(entry.value).unwrap());
+                    }
+                })
+                .expect(
+                    format!("Failed to read write-ahead log snapshot: {:?}", snapshot_path).as_str()
+                );
+        }
+        Ok(())
+    }
+
+    fn maybe_trigger_full_snapshot_(&self, wal: &mut MutexGuard<snapshots::SnapshotWriter>) {
         // If reaching update threshold, trigger full snapshot write.
         // - Allocate the snapshot in a pending state.
         // - Instantly switch to a new WAL file with ordinal higher than the pending snapshot
@@ -250,6 +227,29 @@ impl PersistentKeyValueStore {
         }
     }
 
+    fn write_and_finalize_snapshot_(
+        snapshot_set: &Mutex<Box<dyn SnapshotSet>>,
+        snapshot_task: SnapshotTask
+    ) {
+        let mut writer = snapshots::SnapshotWriter::new(&snapshot_task.snapshot.path, false);
+        for (key, value) in snapshot_task.data_copy.into_iter() {
+            println!("snapshot ke {}", key);
+            writer
+                .append_entry(Self::make_snapshot_entry(key, Some(&value)))
+                .expect("Failed to write full snapshot entry to disk");
+        }
+        // TODO(acgessler): verify that the snapshot was written correctly before publishing.
+        snapshot_set
+            .lock()
+            .unwrap()
+            .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true)
+            .unwrap();
+        println!(
+            "PersistentKeyValueStore: published snapshot with ID {}",
+            snapshot_task.snapshot.ordinal
+        );
+    }
+
     fn make_snapshot_entry(key: String, value: Option<&str>) -> snapshots::SnapshotEntry {
         snapshots::SnapshotEntry {
             key: key,
@@ -261,7 +261,6 @@ impl PersistentKeyValueStore {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::path;
 
     use super::*;
     use tempfile::TempDir;

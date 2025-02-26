@@ -94,12 +94,12 @@ impl PersistentRawKeyValueStore {
         Ok(self_)
     }
 
-    pub fn set(&mut self, key: &[u8], value: &[u8]) -> &mut PersistentRawKeyValueStore {
+    pub fn set(&self, key: Vec<u8>, value: Vec<u8>) -> &PersistentRawKeyValueStore {
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistently ordered.
         {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(Self::make_snapshot_entry(key, Some(&value))).expect(
+            wal.append_entry(Self::make_snapshot_entry(&key, Some(&value))).expect(
                 "Failed to write set op to write-ahead log"
             );
 
@@ -108,7 +108,7 @@ impl PersistentRawKeyValueStore {
             {
                 let bucket = self.get_bucket_(&key);
                 let mut data = bucket.data.write().unwrap();
-                data.insert(key.to_vec(), value.to_vec());
+                data.insert(key, value);
             }
 
             self.maybe_trigger_full_snapshot_(&mut wal);
@@ -116,7 +116,7 @@ impl PersistentRawKeyValueStore {
         self
     }
 
-    pub fn unset(&mut self, key: &[u8]) -> &mut PersistentRawKeyValueStore {
+    pub fn unset(&self, key: &[u8]) -> &PersistentRawKeyValueStore {
         let bucket = self.get_bucket_(&key);
 
         // See notes on lock usage in set()
@@ -254,12 +254,12 @@ mod tests {
     fn setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentRawKeyValueStore::new(
+            let store = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
-            store.set(b"foo", b"1");
-            store.set(b"bar", b"2");
+            store.set(b"foo".to_vec(), b"1".to_vec());
+            store.set(b"bar".to_vec(), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
         }
@@ -277,11 +277,11 @@ mod tests {
     fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentRawKeyValueStore::new(
+            let store = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
-            store.set(b"foo", b"1");
+            store.set(b"foo".to_vec(), b"1".to_vec());
             assert_eq!(store.get(b"bar"), None);
         }
         {
@@ -297,15 +297,15 @@ mod tests {
     fn set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentRawKeyValueStore::new(
+            let store = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
-            store.set(b"foo", b"1");
-            store.set(b"bar", b"2");
+            store.set(b"foo".to_vec(), b"1".to_vec());
+            store.set(b"bar".to_vec(), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
-            store.set(b"bar", b"3");
+            store.set(b"bar".to_vec(), b"3".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
         }
@@ -323,11 +323,8 @@ mod tests {
     fn unset() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let mut store = PersistentRawKeyValueStore::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            store.set(b"foo", b"1");
+            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            store.set(b"foo".to_vec(), b"1".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             store.unset(b"foo");
             assert_eq!(store.get(b"foo"), None);
@@ -348,7 +345,9 @@ mod tests {
         // Create a store and set one key to trigger a snapshot.
         let mut config = Config::default();
         config.snapshot_interval = 1;
-        PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone()).unwrap().set(b"foo", b"1");
+        PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
+            .unwrap()
+            .set(b"foo".to_vec(), b"1".to_vec());
 
         // Verify existence of snapshot files directly:
         //  (Ord=1, Diff) used to be the write-ahead log and has been deleted.
@@ -370,8 +369,8 @@ mod tests {
         config.snapshot_interval = 2;
         PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
             .unwrap()
-            .set(b"bar", b"2")
-            .set(b"baz", b"3")
+            .set(b"bar".to_vec(), b"2".to_vec())
+            .set(b"baz".to_vec(), b"3".to_vec())
             .unset(b"foo");
 
         // Verify existence of snapshot files directly again.

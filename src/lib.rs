@@ -6,18 +6,12 @@
 
 use std::{ borrow::{ Borrow, Cow }, error::Error, str };
 
-use store::{ FixedLengthKey, VariableLengthKey };
+use store::{ FixedLengthKey64Bit, VariableLengthKey, Store, StoreImpl };
 
 mod store;
 mod config;
 mod snapshots;
 mod snapshot_set;
-
-// Hardcoded underlying implementations of store to keep generic interface small.
-enum StoreImpl {
-    FixedKey(store::Store<store::FixedLengthKey>),
-    VariableKey(store::Store<store::VariableLengthKey>),
-}
 
 pub struct PersistentKeyValueStore<K, V> {
     store: StoreImpl,
@@ -39,9 +33,9 @@ impl<K, V> PersistentKeyValueStore<K, V>
     pub fn new(path: &std::path::Path, config: config::Config) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             store: if <K as SerializableKey>::IS_FIXED_SIZE {
-                StoreImpl::FixedKey(store::Store::new(path, config)?)
+                StoreImpl::FixedKey(Store::new(path, config)?)
             } else {
-                StoreImpl::VariableKey(store::Store::new(path, config)?)
+                StoreImpl::VariableKey(Store::new(path, config)?)
             },
             phantom: std::marker::PhantomData,
         })
@@ -52,7 +46,7 @@ impl<K, V> PersistentKeyValueStore<K, V>
         let value = value.into().serialize().into_owned(); //  TODO: Serde
         match &self.store {
             StoreImpl::FixedKey(store) => {
-                store.set(FixedLengthKey(key.serialize_fixed_size().unwrap()), value);
+                store.set(FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()), value);
             }
             StoreImpl::VariableKey(store) => {
                 store.set(VariableLengthKey(key.serialize().into_owned()), value);

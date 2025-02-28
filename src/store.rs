@@ -17,7 +17,7 @@ use crate::snapshots::{ SnapshotReader, SnapshotWriter, SnapshotEntry };
 // On the read path, we always avoid allocations by borrowing as &u8 and leveraging
 // HashMap's native support for looking up borrowed keys.
 #[derive(Clone, PartialEq, Hash, Eq, Default)]
-pub struct FixedLengthKey(pub [u8; 8]);
+pub struct FixedLengthKey64Bit(pub [u8; 8]);
 
 #[derive(Clone, PartialEq, Hash, Eq, Default)]
 pub struct VariableLengthKey(pub Vec<u8>);
@@ -30,7 +30,7 @@ pub trait SwitchKeyAdapter: Clone +
     ToOwned +
     From<Vec<u8>> {}
 
-impl Borrow<[u8]> for FixedLengthKey {
+impl Borrow<[u8]> for FixedLengthKey64Bit {
     fn borrow(&self) -> &[u8] {
         &self.0
     }
@@ -42,11 +42,11 @@ impl Borrow<[u8]> for VariableLengthKey {
     }
 }
 
-impl From<Vec<u8>> for FixedLengthKey {
+impl From<Vec<u8>> for FixedLengthKey64Bit {
     fn from(v: Vec<u8>) -> Self {
         let mut key = [0; 8];
         key.copy_from_slice(&v);
-        FixedLengthKey(key)
+        FixedLengthKey64Bit(key)
     }
 }
 
@@ -56,8 +56,15 @@ impl From<Vec<u8>> for VariableLengthKey {
     }
 }
 
-impl SwitchKeyAdapter for FixedLengthKey {}
+impl SwitchKeyAdapter for FixedLengthKey64Bit {}
 impl SwitchKeyAdapter for VariableLengthKey {}
+
+// Hardcoded underlying implementations of store to keep generic interface small.
+pub enum StoreImpl {
+    FixedKey(Store<FixedLengthKey64Bit>),
+    VariableKey(Store<VariableLengthKey>),
+}
+
 
 struct Bucket<KeyAdapter> {
     data: Arc<RwLock<HashMap<KeyAdapter, Vec<u8>>>>,

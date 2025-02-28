@@ -102,76 +102,65 @@ impl SerializableKey for str {
     }
 }
 
-impl SerializableValue for u64 {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut buf = [0; 8];
-        buf.copy_from_slice(&bytes[..8]);
-        u64::from_le_bytes(buf)
-    }
+macro_rules! implement_integer_key_type {
+    ($integer_type:ident) => {
+        impl SerializableValue for $integer_type {
+            fn from_bytes(bytes: &[u8]) -> Self {
+                let mut buf = [0; std::mem::size_of::<$integer_type>()];
+                buf.copy_from_slice(&bytes[..std::mem::size_of::<$integer_type>()]);
+                $integer_type::from_le_bytes(buf)
+            }
+        }
+        
+        impl SerializableKey for $integer_type {
+            const IS_FIXED_SIZE: bool = true;
+            fn serialize(&self) -> Cow<'_, [u8]> {
+                Cow::Owned(self.to_le_bytes().to_vec())
+            }
+            fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
+                let mut buf = [0; 8];
+                buf.copy_from_slice(&self.to_le_bytes()[..]);
+                Some(buf)
+            }
+        }
+    };
 }
 
-impl SerializableKey for u64 {
-    const IS_FIXED_SIZE: bool = true;
-    fn serialize(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.to_le_bytes().to_vec())
-    }
-    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
-        Some(self.to_le_bytes())
-    }
-}
-
-impl SerializableKey for u32 {
-    const IS_FIXED_SIZE: bool = true;
-    fn serialize(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.to_le_bytes().to_vec())
-    }
-    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
-        let mut buf = [0; 8];
-        buf.copy_from_slice(&self.to_le_bytes()[..]);
-        Some(buf)
-    }
-}
-
-impl SerializableKey for u16 {
-    const IS_FIXED_SIZE: bool = true;
-    fn serialize(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(self.to_le_bytes().to_vec())
-    }
-    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
-        let mut buf = [0; 8];
-        buf.copy_from_slice(&self.to_le_bytes()[..]);
-        Some(buf)
-    }
-}
+implement_integer_key_type!(u64);
+implement_integer_key_type!(i64);
+implement_integer_key_type!(u32);
+implement_integer_key_type!(i32);
+implement_integer_key_type!(u16);
+implement_integer_key_type!(i16);
+implement_integer_key_type!(u8);
+implement_integer_key_type!(i8);
 
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
     use super::*;
+    // This set of tests focuses on the interface with different key, value types,
+    // tests for the actual persistence behaviour are in store.ts.
 
     #[test]
     fn setget_string_string() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store: PersistentKeyValueStore<String, String> = PersistentKeyValueStore::new(
-                tmp_dir.path(),
-                config::Config::default()
-            ).unwrap();
-            store.set("foo", "1");
-            assert_eq!(store.get("foo"), Some("1".to_string()));
-        }
+        let store: PersistentKeyValueStore<String, String> = PersistentKeyValueStore::new(
+            tmp_dir.path(),
+            config::Config::default()
+        ).unwrap();
+        store.set("foo", "1");
+        assert_eq!(store.get("foo"), Some("1".to_string()));
     }
 
     #[test]
     fn setget_int_int() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store: PersistentKeyValueStore<u64, u64> = PersistentKeyValueStore::new(
-                tmp_dir.path(),
-                config::Config::default()
-            ).unwrap();
-            store.set(35293853295u64, 1139131311u64);
-            assert_eq!(store.get(&35293853295u64), Some(1139131311u64));
-        }
+        let store: PersistentKeyValueStore<u64, u64> = PersistentKeyValueStore::new(
+            tmp_dir.path(),
+            config::Config::default()
+        ).unwrap();
+        store.set(35293853295u64, 1139131311u64);
+        assert_eq!(store.get(&35293853295u64), Some(1139131311u64));
     }
 }

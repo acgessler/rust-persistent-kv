@@ -63,7 +63,7 @@ struct Bucket<KeyAdapter> {
     data: Arc<RwLock<HashMap<KeyAdapter, Vec<u8>>>>,
 }
 
-pub struct PersistentRawKeyValueStore<KeyAdapter: SwitchKeyAdapter> {
+pub struct Store<KeyAdapter: SwitchKeyAdapter> {
     config: Config,
     buckets: Vec<Bucket<KeyAdapter>>, // TODO: cache
     wal: Arc<Mutex<SnapshotWriter>>,
@@ -79,14 +79,14 @@ struct SnapshotTask {
     snapshot: SnapshotInfo,
 }
 
-impl<KeyAdapter> Drop for PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
+impl<KeyAdapter> Drop for Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     fn drop(&mut self) {
         self.full_snapshot_writer_sender = None;
         self.full_snapshot_writer_thread.take().unwrap().join().unwrap();
     }
 }
 
-impl<KeyAdapter> PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
+impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     pub fn new(path: &Path, config: Config) -> Result<Self, Box<dyn Error>> {
         Self::new_with_snapshot_set(Box::new(FileSnapshotSet::new(path)?), config)
     }
@@ -144,7 +144,7 @@ impl<KeyAdapter> PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: Switch
         Ok(self_)
     }
 
-    pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &PersistentRawKeyValueStore<KeyAdapter> {
+    pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &Store<KeyAdapter> {
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistently ordered.
         {
@@ -166,7 +166,7 @@ impl<KeyAdapter> PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: Switch
         self
     }
 
-    pub fn unset(&self, key: &[u8]) -> &PersistentRawKeyValueStore<KeyAdapter> {
+    pub fn unset(&self, key: &[u8]) -> &Store<KeyAdapter> {
         let bucket = self.get_bucket_(&key);
 
         // See notes on lock usage in set()
@@ -319,14 +319,14 @@ mod tests {
     fn setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
             store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
         }
         {
-            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
+            let store2: Store<VariableLengthKey> = Store::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -339,12 +339,12 @@ mod tests {
     fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
             store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             assert_eq!(store.get(b"bar"), None);
         }
         {
-            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
+            let store2: Store<VariableLengthKey> = Store::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -356,7 +356,7 @@ mod tests {
     fn set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
             store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
@@ -366,7 +366,7 @@ mod tests {
             assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
         }
         {
-            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
+            let store2: Store<VariableLengthKey> = Store::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -379,14 +379,14 @@ mod tests {
     fn unset() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
             store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             store.unset(b"foo");
             assert_eq!(store.get(b"foo"), None);
         }
         {
-            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
+            let store2: Store<VariableLengthKey> = Store::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -401,7 +401,7 @@ mod tests {
         // Create a store and set one key to trigger a snapshot.
         let mut config = Config::default();
         config.snapshot_interval = 1;
-        PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
+        Store::new(tmp_dir.path(), config.clone())
             .unwrap()
             .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
 
@@ -423,7 +423,7 @@ mod tests {
         // snapshot) and then delete a third (does not trigger snapshot)
         let mut config = Config::default();
         config.snapshot_interval = 2;
-        PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
+        Store::new(tmp_dir.path(), config.clone())
             .unwrap()
             .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
             .set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec())

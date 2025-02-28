@@ -15,8 +15,8 @@ mod snapshot_set;
 
 // Hardcoded underlying implementations of store to keep generic interface small.
 enum StoreImpl {
-    FixedKey(store::PersistentRawKeyValueStore<store::FixedLengthKey>),
-    VariableKey(store::PersistentRawKeyValueStore<store::VariableLengthKey>),
+    FixedKey(store::Store<store::FixedLengthKey>),
+    VariableKey(store::Store<store::VariableLengthKey>),
 }
 
 pub struct PersistentKeyValueStore<K, V> {
@@ -29,8 +29,8 @@ pub trait SerializableValue {
 }
 pub trait SerializableKey {
     const IS_FIXED_SIZE: bool;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]>;
-    fn to_fixed_size(&self) -> Option<[u8; 8]>;
+    fn serialize(&self) -> Cow<'_, [u8]>;
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]>;
 }
 
 impl<K, V> PersistentKeyValueStore<K, V>
@@ -39,56 +39,55 @@ impl<K, V> PersistentKeyValueStore<K, V>
     pub fn new(path: &std::path::Path, config: config::Config) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             store: if <K as SerializableKey>::IS_FIXED_SIZE {
-                StoreImpl::FixedKey(store::PersistentRawKeyValueStore::new(path, config)?)
+                StoreImpl::FixedKey(store::Store::new(path, config)?)
             } else {
-                StoreImpl::VariableKey(store::PersistentRawKeyValueStore::new(path, config)?)
+                StoreImpl::VariableKey(store::Store::new(path, config)?)
             },
             phantom: std::marker::PhantomData,
         })
     }
 
-    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) -> &Self {
+    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) {
         let key = key.into();
-        let value = value.into().to_bytes_ref().into_owned(); //  TODO: Serde
+        let value = value.into().serialize().into_owned(); //  TODO: Serde
         match &self.store {
             StoreImpl::FixedKey(store) => {
-                store.set(FixedLengthKey(key.to_fixed_size().unwrap()), value);
+                store.set(FixedLengthKey(key.serialize_fixed_size().unwrap()), value);
             }
             StoreImpl::VariableKey(store) => {
-                store.set(VariableLengthKey(key.to_bytes_ref().into_owned()), value);
+                store.set(VariableLengthKey(key.serialize().into_owned()), value);
             }
         }
-        self
     }
 
     pub fn get<Q>(&self, key: &Q) -> Option<V> where K: Borrow<Q>, Q: ?Sized + SerializableKey {
-        (
-            match &self.store {
-                StoreImpl::FixedKey(store) => { store.get(key.to_fixed_size().unwrap().borrow()) }
-                StoreImpl::VariableKey(store) => { store.get(key.to_bytes_ref().borrow()) }
+        let value = match &self.store {
+            StoreImpl::FixedKey(store) => {
+                store.get(key.serialize_fixed_size().unwrap().borrow())
             }
-        ).map(|v| V::from_bytes(&v))
+            StoreImpl::VariableKey(store) => { store.get(&key.serialize()) }
+        };
+        value.map(|value| V::from_bytes(&value))
     }
 
-    pub fn unset<Q>(&self, key: &Q) -> &Self where K: Borrow<Q>, Q: ?Sized + SerializableKey {
+    pub fn unset<Q>(&self, key: &Q) where K: Borrow<Q>, Q: ?Sized + SerializableKey {
         match &self.store {
             StoreImpl::FixedKey(store) => {
-                store.unset(key.to_fixed_size().unwrap().borrow());
+                store.unset(key.serialize_fixed_size().unwrap().borrow());
             }
             StoreImpl::VariableKey(store) => {
-                store.unset(key.to_bytes_ref().borrow());
+                store.unset(key.serialize().borrow());
             }
         }
-        self
     }
 }
 
 impl SerializableKey for String {
     const IS_FIXED_SIZE: bool = false;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]> {
+    fn serialize(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.as_bytes())
     }
-    fn to_fixed_size(&self) -> Option<[u8; 8]> {
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
         None
     }
 }
@@ -101,10 +100,10 @@ impl SerializableValue for String {
 
 impl SerializableKey for str {
     const IS_FIXED_SIZE: bool = false;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]> {
+    fn serialize(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.as_bytes())
     }
-    fn to_fixed_size(&self) -> Option<[u8; 8]> {
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
         None
     }
 }
@@ -119,20 +118,20 @@ impl SerializableValue for u64 {
 
 impl SerializableKey for u64 {
     const IS_FIXED_SIZE: bool = true;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]> {
+    fn serialize(&self) -> Cow<'_, [u8]> {
         Cow::Owned(self.to_le_bytes().to_vec())
     }
-    fn to_fixed_size(&self) -> Option<[u8; 8]> {
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
         Some(self.to_le_bytes())
     }
 }
 
 impl SerializableKey for u32 {
     const IS_FIXED_SIZE: bool = true;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]> {
+    fn serialize(&self) -> Cow<'_, [u8]> {
         Cow::Owned(self.to_le_bytes().to_vec())
     }
-    fn to_fixed_size(&self) -> Option<[u8; 8]> {
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
         let mut buf = [0; 8];
         buf.copy_from_slice(&self.to_le_bytes()[..]);
         Some(buf)
@@ -141,10 +140,10 @@ impl SerializableKey for u32 {
 
 impl SerializableKey for u16 {
     const IS_FIXED_SIZE: bool = true;
-    fn to_bytes_ref(&self) -> Cow<'_, [u8]> {
+    fn serialize(&self) -> Cow<'_, [u8]> {
         Cow::Owned(self.to_le_bytes().to_vec())
     }
-    fn to_fixed_size(&self) -> Option<[u8; 8]> {
+    fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
         let mut buf = [0; 8];
         buf.copy_from_slice(&self.to_le_bytes()[..]);
         Some(buf)

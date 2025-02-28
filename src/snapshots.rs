@@ -63,7 +63,7 @@ impl SnapshotReader {
                     break;
                 }
                 let len = buffer.len();
-                let entry = SnapshotEntry::decode_length_delimited(&mut buffer)?;
+                let entry = SnapshotEntry::decode_length_delimited(&mut buffer)?; // TODO: avoid allocations
                 callback(entry);
                 len - buffer.len()
             };

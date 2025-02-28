@@ -1,7 +1,9 @@
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     error::Error,
     hash::{ DefaultHasher, Hash, Hasher },
+    ops::Range,
     path::Path,
     sync::{ atomic::AtomicU64, Arc, Mutex, MutexGuard, RwLock },
 };
@@ -10,13 +12,60 @@ use crate::config::Config;
 use crate::snapshot_set::{ SnapshotInfo, SnapshotSet, SnapshotType, FileSnapshotSet };
 use crate::snapshots::{ SnapshotReader, SnapshotWriter, SnapshotEntry };
 
-struct Bucket {
-    data: Arc<RwLock<HashMap<Vec<u8>, Vec<u8>>>>,
+// Support switching between fixed (up to 8 bytes) and variable length keys.
+// The former is used for all integer types and avoids allocations on the write path.
+// On the read path, we always avoid allocations by borrowing as &u8 and leveraging
+// HashMap's native support for looking up borrowed keys.
+#[derive(Clone, PartialEq, Hash, Eq, Default)]
+pub struct FixedLengthKey(pub [u8; 8]);
+
+#[derive(Clone, PartialEq, Hash, Eq, Default)]
+pub struct VariableLengthKey(pub Vec<u8>);
+
+pub trait SwitchKeyAdapter: Clone +
+    PartialEq +
+    Hash +
+    Eq +
+    Borrow<[u8]> +
+    ToOwned +
+    From<Vec<u8>> {}
+
+impl Borrow<[u8]> for FixedLengthKey {
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
 }
 
-pub struct PersistentRawKeyValueStore {
+impl Borrow<[u8]> for VariableLengthKey {
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for FixedLengthKey {
+    fn from(v: Vec<u8>) -> Self {
+        let mut key = [0; 8];
+        key.copy_from_slice(&v);
+        FixedLengthKey(key)
+    }
+}
+
+impl From<Vec<u8>> for VariableLengthKey {
+    fn from(v: Vec<u8>) -> Self {
+        VariableLengthKey(v)
+    }
+}
+
+impl SwitchKeyAdapter for FixedLengthKey {}
+impl SwitchKeyAdapter for VariableLengthKey {}
+
+struct Bucket<KeyAdapter> {
+    data: Arc<RwLock<HashMap<KeyAdapter, Vec<u8>>>>,
+}
+
+pub struct PersistentRawKeyValueStore<KeyAdapter: SwitchKeyAdapter> {
     config: Config,
-    data: Vec<Bucket>, // TODO: cache
+    buckets: Vec<Bucket<KeyAdapter>>, // TODO: cache
     wal: Arc<Mutex<SnapshotWriter>>,
     snapshot_set: Arc<Mutex<Box<dyn SnapshotSet>>>,
     update_counter: AtomicU64,
@@ -25,18 +74,19 @@ pub struct PersistentRawKeyValueStore {
 }
 
 struct SnapshotTask {
-    data_copy: HashMap<Vec<u8>, Vec<u8>>,
+    raw_data: Vec<u8>,
+    ranges: Vec<(Range<usize>, Range<usize>)>,
     snapshot: SnapshotInfo,
 }
 
-impl Drop for PersistentRawKeyValueStore {
+impl<KeyAdapter> Drop for PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     fn drop(&mut self) {
         self.full_snapshot_writer_sender = None;
         self.full_snapshot_writer_thread.take().unwrap().join().unwrap();
     }
 }
 
-impl PersistentRawKeyValueStore {
+impl<KeyAdapter> PersistentRawKeyValueStore<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     pub fn new(path: &Path, config: Config) -> Result<Self, Box<dyn Error>> {
         Self::new_with_snapshot_set(Box::new(FileSnapshotSet::new(path)?), config)
     }
@@ -56,7 +106,7 @@ impl PersistentRawKeyValueStore {
         let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, true)?;
         let mut self_ = Self {
             config,
-            data,
+            buckets: data,
             snapshot_set: Arc::new(Mutex::new(snapshot_set)),
             wal: Mutex::new(SnapshotWriter::new(&wal_path.path, true)).into(),
             full_snapshot_writer_thread: None,
@@ -94,21 +144,21 @@ impl PersistentRawKeyValueStore {
         Ok(self_)
     }
 
-    pub fn set(&self, key: Vec<u8>, value: Vec<u8>) -> &PersistentRawKeyValueStore {
+    pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &PersistentRawKeyValueStore<KeyAdapter> {
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistently ordered.
         {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(Self::make_snapshot_entry(&key, Some(&value))).expect(
+            wal.append_entry(Self::make_snapshot_entry(key.borrow(), Some(&value))).expect(
                 "Failed to write set op to write-ahead log"
             );
 
             // Hold shorter lock on in-memory bucket to avoid blocking concurrent
             // readers on the full I/O operation.
             {
-                let bucket = self.get_bucket_(&key);
+                let bucket = self.get_bucket_(key.borrow());
                 let mut data = bucket.data.write().unwrap();
-                data.insert(key, value);
+                data.insert(key.clone(), value);
             }
 
             self.maybe_trigger_full_snapshot_(&mut wal);
@@ -116,7 +166,7 @@ impl PersistentRawKeyValueStore {
         self
     }
 
-    pub fn unset(&self, key: &[u8]) -> &PersistentRawKeyValueStore {
+    pub fn unset(&self, key: &[u8]) -> &PersistentRawKeyValueStore<KeyAdapter> {
         let bucket = self.get_bucket_(&key);
 
         // See notes on lock usage in set()
@@ -141,10 +191,10 @@ impl PersistentRawKeyValueStore {
         bucket.data.read().unwrap().get(key).cloned()
     }
 
-    fn get_bucket_(&self, key: &[u8]) -> &Bucket {
-        let hash = PersistentRawKeyValueStore::hash_(key);
+    fn get_bucket_(&self, key: &[u8]) -> &Bucket<KeyAdapter> {
+        let hash = Self::hash_(key);
         let index = hash % (self.config.memory_bucket_count as u64);
-        &self.data[index as usize]
+        &self.buckets[index as usize]
     }
 
     fn hash_(key: &[u8]) -> u64 {
@@ -159,13 +209,14 @@ impl PersistentRawKeyValueStore {
         for snapshot_path in snapshots_to_restore {
             SnapshotReader::new(&snapshot_path.path)
                 .read_entries(|entry| {
-                    let bucket = self.get_bucket_(&entry.key);
+                    let key: KeyAdapter = entry.key.to_owned().into();
+                    let bucket = self.get_bucket_(key.borrow());
                     let mut data = bucket.data.write().unwrap();
 
                     if entry.value.is_empty() {
-                        data.remove(&entry.key);
+                        data.remove(key.borrow());
                     } else {
-                        data.insert(entry.key, entry.value);
+                        data.insert(key, entry.value);
                     }
                 })
                 .expect(
@@ -193,17 +244,26 @@ impl PersistentRawKeyValueStore {
                 &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, false).unwrap().path,
                 true
             );
-            let mut data_copy = HashMap::new();
-            for bucket in self.data.iter() {
+
+            let mut raw_data = Vec::new();
+            let mut ranges = Vec::new();
+            for bucket in self.buckets.iter() {
                 let data = bucket.data.read().unwrap();
                 for (key, value) in data.iter() {
-                    data_copy.insert(key.clone(), value.clone());
+                    let key = key.borrow();
+                    let start = raw_data.len();
+                    raw_data.extend_from_slice(key);
+                    raw_data.extend_from_slice(value);
+                    ranges.push((
+                        Range { start: start, end: start + key.len() },
+                        Range { start: start + key.len(), end: raw_data.len() },
+                    ));
                 }
             }
             self.full_snapshot_writer_sender
                 .as_ref()
                 .unwrap()
-                .send(SnapshotTask { data_copy, snapshot: pending_snapshot.clone() })
+                .send(SnapshotTask { raw_data, ranges, snapshot: pending_snapshot.clone() })
                 .unwrap();
             // See write_and_finalize_snapshot_() below for the rest of the snapshot process.
         }
@@ -214,9 +274,13 @@ impl PersistentRawKeyValueStore {
         snapshot_task: SnapshotTask
     ) {
         let mut writer = SnapshotWriter::new(&snapshot_task.snapshot.path, false);
-        for (key, value) in snapshot_task.data_copy.into_iter() {
+        for (key_range, value_range) in snapshot_task.ranges.iter() {
+            // TODO(acgessler): avoid allocations here
             writer
-                .append_entry(Self::make_snapshot_entry(&key, Some(&value)))
+                .append_entry(SnapshotEntry {
+                    key: snapshot_task.raw_data[key_range.clone()].to_vec(),
+                    value: snapshot_task.raw_data[value_range.clone()].to_vec(),
+                })
                 .expect("Failed to write full snapshot entry to disk");
         }
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
@@ -231,6 +295,7 @@ impl PersistentRawKeyValueStore {
         );
     }
 
+    // TODO(acgessler): avoid allocations here
     fn make_snapshot_entry(key: &[u8], value: Option<&[u8]>) -> SnapshotEntry {
         SnapshotEntry {
             key: key.to_vec(),
@@ -254,17 +319,14 @@ mod tests {
     fn setget() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            store.set(b"foo".to_vec(), b"1".to_vec());
-            store.set(b"bar".to_vec(), b"2".to_vec());
+            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+            store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
         }
         {
-            let store2 = PersistentRawKeyValueStore::new(
+            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -277,15 +339,12 @@ mod tests {
     fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            store.set(b"foo".to_vec(), b"1".to_vec());
+            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             assert_eq!(store.get(b"bar"), None);
         }
         {
-            let store2 = PersistentRawKeyValueStore::new(
+            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -297,20 +356,17 @@ mod tests {
     fn set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
         {
-            let store = PersistentRawKeyValueStore::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            store.set(b"foo".to_vec(), b"1".to_vec());
-            store.set(b"bar".to_vec(), b"2".to_vec());
+            let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+            store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
-            store.set(b"bar".to_vec(), b"3".to_vec());
+            store.set(VariableLengthKey(b"bar".to_vec()), b"3".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
         }
         {
-            let store2 = PersistentRawKeyValueStore::new(
+            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -324,13 +380,13 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         {
             let store = PersistentRawKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
-            store.set(b"foo".to_vec(), b"1".to_vec());
+            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
             assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
             store.unset(b"foo");
             assert_eq!(store.get(b"foo"), None);
         }
         {
-            let store2 = PersistentRawKeyValueStore::new(
+            let store2: PersistentRawKeyValueStore<VariableLengthKey> = PersistentRawKeyValueStore::new(
                 tmp_dir.path(),
                 Config::default()
             ).unwrap();
@@ -347,7 +403,7 @@ mod tests {
         config.snapshot_interval = 1;
         PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
             .unwrap()
-            .set(b"foo".to_vec(), b"1".to_vec());
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
 
         // Verify existence of snapshot files directly:
         //  (Ord=1, Diff) used to be the write-ahead log and has been deleted.
@@ -369,8 +425,8 @@ mod tests {
         config.snapshot_interval = 2;
         PersistentRawKeyValueStore::new(tmp_dir.path(), config.clone())
             .unwrap()
-            .set(b"bar".to_vec(), b"2".to_vec())
-            .set(b"baz".to_vec(), b"3".to_vec())
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec())
             .unset(b"foo");
 
         // Verify existence of snapshot files directly again.

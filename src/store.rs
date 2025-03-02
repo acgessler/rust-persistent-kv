@@ -10,7 +10,7 @@ use std::{
 
 use crate::config::Config;
 use crate::snapshot_set::{ SnapshotInfo, SnapshotSet, SnapshotType, FileSnapshotSet };
-use crate::snapshots::{ SnapshotReader, SnapshotWriter, SnapshotEntry };
+use crate::snapshots::{ SnapshotReader, SnapshotWriter };
 
 // Support switching between fixed (up to 8 bytes) and variable length keys.
 // The former is used for all integer types and avoids allocations on the write path.
@@ -64,7 +64,6 @@ pub enum StoreImpl {
     FixedKey(Store<FixedLengthKey64Bit>),
     VariableKey(Store<VariableLengthKey>),
 }
-
 
 struct Bucket<KeyAdapter> {
     data: Arc<RwLock<HashMap<KeyAdapter, Vec<u8>>>>,
@@ -156,7 +155,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         // write-ahead log is consistently ordered.
         {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(Self::make_snapshot_entry(key.borrow(), Some(&value))).expect(
+            wal.append_entry(key.borrow(), Some(&value)).expect(
                 "Failed to write set op to write-ahead log"
             );
 
@@ -179,9 +178,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         // See notes on lock usage in set()
         {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(Self::make_snapshot_entry(key, None)).expect(
-                "Failed to write unset op to write-ahead log"
-            );
+            wal.append_entry(key, None).expect("Failed to write unset op to write-ahead log");
             {
                 let mut data = bucket.data.write().unwrap();
                 data.remove(key);
@@ -223,7 +220,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                     if entry.value.is_empty() {
                         data.remove(key.borrow());
                     } else {
-                        data.insert(key, entry.value);
+                        data.insert(key, entry.value.clone());
                     }
                 })
                 .expect(
@@ -284,10 +281,10 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         for (key_range, value_range) in snapshot_task.ranges.iter() {
             // TODO(acgessler): avoid allocations here
             writer
-                .append_entry(SnapshotEntry {
-                    key: snapshot_task.raw_data[key_range.clone()].to_vec(),
-                    value: snapshot_task.raw_data[value_range.clone()].to_vec(),
-                })
+                .append_entry(
+                    &snapshot_task.raw_data[key_range.clone()],
+                    Some(&snapshot_task.raw_data[value_range.clone()])
+                )
                 .expect("Failed to write full snapshot entry to disk");
         }
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
@@ -300,14 +297,6 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
             "PersistentKeyValueStore: published snapshot with ID {}",
             snapshot_task.snapshot.ordinal
         );
-    }
-
-    // TODO(acgessler): avoid allocations here
-    fn make_snapshot_entry(key: &[u8], value: Option<&[u8]>) -> SnapshotEntry {
-        SnapshotEntry {
-            key: key.to_vec(),
-            value: value.map(|v| v.to_vec()).unwrap_or_default(),
-        }
     }
 }
 

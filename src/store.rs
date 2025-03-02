@@ -277,7 +277,6 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     ) {
         let mut writer = SnapshotWriter::new(&snapshot_task.snapshot.path, false);
         for (key_range, value_range) in snapshot_task.ranges.iter() {
-            // TODO(acgessler): avoid allocations here
             writer
                 .append_entry(
                     &snapshot_task.raw_data[key_range.clone()],

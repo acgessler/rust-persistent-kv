@@ -10,7 +10,12 @@ clap = "2.33.3"
 
 [dev-dependencies]
 tempfile = "3.2"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bin]]         
 name = "persistent-kv-cli"    
-path = "main.rs"
+path = "./src/main.rs"
+
+[[bench]]
+name = "benchmark"
+harness = false

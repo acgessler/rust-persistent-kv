@@ -140,7 +140,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                             while let Ok(queued_snapshot_task) = receiver.try_recv() {
                                 snapshot_task = queued_snapshot_task;
                             }
-                            Self::write_and_finalize_snapshot_(&*snapshot_set, snapshot_task);
+                            Self::write_and_finalize_snapshot_(&snapshot_set, snapshot_task);
                         }
                     }
                 }
@@ -173,7 +173,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     }
 
     pub fn unset(&self, key: &[u8]) -> &Store<KeyAdapter> {
-        let bucket = self.get_bucket_(&key);
+        let bucket = self.get_bucket_(key);
 
         // See notes on lock usage in set()
         {
@@ -223,9 +223,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                         data.insert(key, entry.value.clone());
                     }
                 })
-                .expect(
-                    format!("Failed to read write-ahead log snapshot: {:?}", snapshot_path).as_str()
-                );
+                .unwrap_or_else(|_| panic!("Failed to read write-ahead log snapshot: {:?}", snapshot_path));
         }
         Ok(())
     }
@@ -259,7 +257,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                     raw_data.extend_from_slice(key);
                     raw_data.extend_from_slice(value);
                     ranges.push((
-                        Range { start: start, end: start + key.len() },
+                        Range { start, end: start + key.len() },
                         Range { start: start + key.len(), end: raw_data.len() },
                     ));
                 }

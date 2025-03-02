@@ -125,7 +125,7 @@ impl SnapshotSet for FileSnapshotSet {
             }
         }
         // Should (and could) return &SnapshotInfo, but borrow checker doesn't follow the branches.
-        self.create_new_snapshot_file_(snapshot_type).map(|e| e.clone())
+        self.create_new_snapshot_file_(snapshot_type).cloned()
     }
 
     fn publish_completed_snapshot(
@@ -351,13 +351,13 @@ mod tests {
     }
 
     #[test]
-    fn basic_detection() {
+    fn snapshots_in_ordinal_order() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_pending.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "other_file.txt");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_4_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(tmp_dir.path(), "other_file.txt");
 
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 4);
@@ -386,8 +386,8 @@ mod tests {
     #[test]
     fn fails_duplicate_ordinals() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin");
 
         let error = FileSnapshotSet::new(tmp_dir.path()).unwrap_err();
         assert_eq!(error, "Duplicate snapshot ordinals detected");
@@ -396,9 +396,9 @@ mod tests {
     #[test]
     fn registers_new_snapshot_path_assigns_new_snapshot_ordinals() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_60_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_900000000000_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_0_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_60_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_900000000000_pending.bin");
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let new_diff_snapshot_path = snapshot_set
@@ -429,9 +429,9 @@ mod tests {
     #[test]
     fn registers_new_snapshot_path_reuses_most_recent_diff_ordinal() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_0_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_diff.bin");
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let new_diff_snapshot_path = snapshot_set
@@ -470,7 +470,7 @@ mod tests {
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin");
 
         let error = snapshot_set
             .create_or_get_snapshot(SnapshotType::Diff, true)
@@ -493,10 +493,10 @@ mod tests {
     #[test]
     fn gets_latest_full_snapshot() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_0_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_0_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin");
 
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let latest_full_snapshot = snapshot_set.get_latest_full_snapshot().unwrap();
@@ -507,12 +507,12 @@ mod tests {
     #[test]
     fn gets_all_diff_snapshots_since() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_5_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_9999_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_4_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_5_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_9999_diff.bin");
 
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let latest_full_snapshot = snapshot_set.get_latest_full_snapshot().unwrap();
@@ -528,10 +528,10 @@ mod tests {
     #[test]
     fn publishes_completed_snapshot() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin"); // Incorporated into snapshot
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_diff.bin"); // Incorporated into snapshot
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_pending.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_diff.bin"); // Created after snapshot cut-off
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin"); // Incorporated into snapshot
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_diff.bin"); // Incorporated into snapshot
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_4_diff.bin"); // Created after snapshot cut-off
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         snapshot_set.publish_completed_snapshot(3, true).unwrap();
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn publishes_completed_snapshot_already_published() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin");
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         let error = snapshot_set.publish_completed_snapshot(1, true).map_err(|e| e.kind());
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn publishes_completed_snapshot_not_found() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin");
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         let error = snapshot_set.publish_completed_snapshot(2, true).map_err(|e| e.kind());
@@ -575,11 +575,11 @@ mod tests {
     #[test]
     fn gets_snapshots_to_restore() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_pending.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_5_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_4_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_5_diff.bin");
 
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
@@ -593,11 +593,11 @@ mod tests {
     #[test]
     fn prunes_backup_snapshots() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_full.bin"); // Backup
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin"); // Backup
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_diff.bin");
-        create_snapshot_file(&tmp_dir.path(), "snapshot_4_full.bin"); // Backup
-        create_snapshot_file(&tmp_dir.path(), "snapshot_5_full.bin"); // Latest
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_full.bin"); // Backup
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin"); // Backup
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_diff.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_4_full.bin"); // Backup
+        create_snapshot_file(tmp_dir.path(), "snapshot_5_full.bin"); // Latest
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 5);
@@ -625,9 +625,9 @@ mod tests {
     #[test]
     fn prunes_not_completed_snapshots() {
         let tmp_dir = create_temp_dir();
-        create_snapshot_file(&tmp_dir.path(), "snapshot_1_pending.bin"); // Not completed
-        create_snapshot_file(&tmp_dir.path(), "snapshot_2_full.bin"); // Not completed
-        create_snapshot_file(&tmp_dir.path(), "snapshot_3_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_3_pending.bin");
+        create_snapshot_file(tmp_dir.path(), "snapshot_1_pending.bin"); // Not completed
+        create_snapshot_file(tmp_dir.path(), "snapshot_2_full.bin");    // Not completed
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 3);

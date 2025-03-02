@@ -235,13 +235,13 @@ impl FileSnapshotSet {
                 });
             }
         }
+        snapshots.sort_by_key(|snapshot| snapshot.ordinal);
 
         // Verify all ordinals are unique.
         let mut ordinals = snapshots
             .iter()
             .map(|snapshot| snapshot.ordinal)
             .collect::<Vec<_>>();
-        ordinals.sort();
         ordinals.dedup();
         if ordinals.len() != snapshots.len() {
             return Err("Duplicate snapshot ordinals detected");

@@ -87,7 +87,7 @@ impl SnapshotReader {
         }
         Ok(())
     }
-
+    #[cfg(test)]
     pub fn read_entries_to_vec(
         &mut self
     ) -> Result<Vec<SnapshotEntry>, Box<dyn std::error::Error>> {

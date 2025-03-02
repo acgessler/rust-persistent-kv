@@ -73,6 +73,7 @@ pub trait SnapshotSet: Send {
 }
 
 /// Admin operations for a snapshot set, e.g. pruning snapshots.
+#[allow(dead_code)]
 pub trait SnapshotSetAdmin: Send {
     /// Prunes backup snapshots, keeping only the latest `max_backups_keep` full snapshots.
     /// This is useful to limit the number of backup snapshots that are kept around.

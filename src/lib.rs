@@ -121,7 +121,7 @@ macro_rules! implement_integer_key_type {
             }
             fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
                 let mut buf = [0; 8];
-                buf.copy_from_slice(&self.to_le_bytes()[..]);
+                buf[..std::mem::size_of::<$integer_type>()].copy_from_slice(&self.to_le_bytes()[..]);
                 Some(buf)
             }
         }
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn setget_int_int() {
+    fn setget_u64_u64() {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<u64, u64> = PersistentKeyValueStore::new(
             tmp_dir.path(),
@@ -164,5 +164,16 @@ mod tests {
         ).unwrap();
         store.set(35293853295u64, 1139131311u64);
         assert_eq!(store.get(&35293853295u64), Some(1139131311u64));
+    }
+
+    #[test]
+    fn setget_i32_i32() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store: PersistentKeyValueStore<i32, i32> = PersistentKeyValueStore::new(
+            tmp_dir.path(),
+            Config::default()
+        ).unwrap();
+        store.set(352938539, 113913131);
+        assert_eq!(store.get(&352938539), Some(113913131));
     }
 }

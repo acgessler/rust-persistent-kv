@@ -5,6 +5,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SnapshotEntry {
@@ -15,15 +16,39 @@ pub struct SnapshotEntry {
 }
 
 pub struct SnapshotWriter {
-    file: File,
+    file: Arc<File>,
     buffer: Vec<u8>,
     entry: SnapshotEntry,
+}
+
+pub struct SnapshotAppendOp {
+    file: Arc<File>,
+    fsynced: bool,
+}
+
+impl SnapshotAppendOp {
+    fn fsync(&mut self) {
+        self.fsynced = true;
+        // TODO(acgessler): Offer config option as to whether F_FULLFSYNC is required
+        // or if loosing a few writes in a power-off scenario is acceptable.
+        self.file.sync_all().unwrap();
+    }
+}
+
+impl Drop for SnapshotAppendOp {
+    fn drop(&mut self) {
+        if !self.fsynced {
+            self.fsync();
+        }
+    }
 }
 
 impl SnapshotWriter {
     pub fn new(path: &Path, append: bool) -> Self {
         Self {
-            file: OpenOptions::new().write(true).append(append).create(true).open(path).unwrap(),
+            file: Arc::new(
+                OpenOptions::new().write(true).append(append).create(true).open(path).unwrap()
+            ),
             buffer: Vec::new(),
             entry: SnapshotEntry::default(),
         }
@@ -33,7 +58,7 @@ impl SnapshotWriter {
         &mut self,
         key: &[u8],
         value: Option<&[u8]>
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<SnapshotAppendOp, Box<dyn std::error::Error>> {
         // Reuse entry and byte buffer memory to avoid unnecessary allocations
         self.entry.value.clear();
         if let Some(value) = value {
@@ -46,10 +71,10 @@ impl SnapshotWriter {
         self.entry.encode_length_delimited(&mut self.buffer)?;
         self.file.write_all(&self.buffer)?;
 
-        // TODO(acgessler): Offer config option as to whether F_FULLFSYNC is required
-        // or if loosing a few writes in a power-off scenario is acceptable.
-        self.file.sync_all().unwrap();
-        Ok(())
+        Ok(SnapshotAppendOp {
+            file: self.file.clone(),
+            fsynced: false,
+        })
     }
 }
 

@@ -151,24 +151,25 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
     }
 
     pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &Store<KeyAdapter> {
+        let bucket = self.get_bucket_(key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
-        // write-ahead log is consistently ordered.
-        {
+        // write-ahead log is consistent w.r.t. the in-memory map.
+        // _append_op allows postponing writes/commit actions that do not need the lock.
+        let _append_op = {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(key.borrow(), Some(&value)).expect(
-                "Failed to write set op to write-ahead log"
-            );
+            let append_op = wal
+                .append_entry(key.borrow(), Some(&value))
+                .expect("Failed to write set op to write-ahead log");
 
             // Hold shorter lock on in-memory bucket to avoid blocking concurrent
             // readers on the full I/O operation.
             {
-                let bucket = self.get_bucket_(key.borrow());
                 let mut data = bucket.data.write().unwrap();
                 data.insert(key.clone(), value);
             }
-
             self.maybe_trigger_full_snapshot_(&mut wal);
-        }
+            append_op
+        };
         self
     }
 
@@ -176,16 +177,21 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         let bucket = self.get_bucket_(key);
 
         // See notes on lock usage in set()
-        {
+        let _append_op = {
             let mut wal = self.wal.lock().unwrap();
-            wal.append_entry(key, None).expect("Failed to write unset op to write-ahead log");
+            let append_op = wal
+                .append_entry(key, None)
+                .expect("Failed to write unset op to write-ahead log");
+
+            // Hold shorter lock on in-memory bucket to avoid blocking concurrent
+            // readers on the full I/O operation.
             {
                 let mut data = bucket.data.write().unwrap();
                 data.remove(key);
             }
-
             self.maybe_trigger_full_snapshot_(&mut wal);
-        }
+            append_op
+        };
         self
     }
 
@@ -223,7 +229,9 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                         data.insert(key, entry.value.clone());
                     }
                 })
-                .unwrap_or_else(|_| panic!("Failed to read write-ahead log snapshot: {:?}", snapshot_path));
+                .unwrap_or_else(|_|
+                    panic!("Failed to read write-ahead log snapshot: {:?}", snapshot_path)
+                );
         }
         Ok(())
     }

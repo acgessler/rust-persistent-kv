@@ -26,9 +26,9 @@ pub struct Config  {
     pub memory_bucket_count : usize,
 }
 
-impl Config {
+impl Default for Config {
 
-    pub fn default() -> Config {
+    fn default() -> Config {
         Self {
             snapshot_interval: 10000,
             memory_bucket_count: 32

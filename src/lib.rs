@@ -8,6 +8,8 @@ use std::{ borrow::{ Borrow, Cow }, error::Error, str };
 
 use store::{ FixedLengthKey64Bit, VariableLengthKey, Store, StoreImpl };
 
+pub use config::Config;
+
 mod store;
 mod config;
 mod snapshots;
@@ -30,7 +32,7 @@ pub trait SerializableKey {
 impl<K, V> PersistentKeyValueStore<K, V>
     where K: SerializableKey, V: SerializableValue + SerializableKey
 {
-    pub fn new(path: &std::path::Path, config: config::Config) -> Result<Self, Box<dyn Error>> {
+    pub fn new(path: &std::path::Path, config: Config) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             store: if <K as SerializableKey>::IS_FIXED_SIZE {
                 StoreImpl::FixedKey(Store::new(path, config)?)
@@ -147,7 +149,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<String, String> = PersistentKeyValueStore::new(
             tmp_dir.path(),
-            config::Config::default()
+            Config::default()
         ).unwrap();
         store.set("foo", "1");
         assert_eq!(store.get("foo"), Some("1".to_string()));
@@ -158,7 +160,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<u64, u64> = PersistentKeyValueStore::new(
             tmp_dir.path(),
-            config::Config::default()
+            Config::default()
         ).unwrap();
         store.set(35293853295u64, 1139131311u64);
         assert_eq!(store.get(&35293853295u64), Some(1139131311u64));

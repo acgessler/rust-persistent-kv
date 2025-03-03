@@ -32,9 +32,7 @@ pub struct SnapshotAppendOp {
 impl SnapshotAppendOp {
     fn fsync(&mut self) {
         self.should_sync = false;
-        // TODO(acgessler): Offer config option as to whether F_FULLFSYNC is required
-        // or if loosing a few writes in a power-off scenario is acceptable.
-        self.file.sync_all().unwrap();
+        self.file.sync_data().unwrap();
     }
 }
 

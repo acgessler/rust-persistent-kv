@@ -20,6 +20,12 @@ pub struct PersistentKeyValueStore<K, V> {
     phantom: std::marker::PhantomData<(K, V)>,
 }
 
+// We don't need K to be Sync + Send as we only operate on the serialized version
+// when passing the data between threads internally and the external interface
+// exposes only clones, not references. 
+unsafe impl<K, V> Sync for PersistentKeyValueStore<K, V> {}
+unsafe impl<K, V> Send for PersistentKeyValueStore<K, V> {}
+
 pub trait SerializableValue {
     fn from_bytes(bytes: &[u8]) -> Self;
 }

@@ -8,7 +8,7 @@ use std::{
     sync::{ atomic::AtomicU64, Arc, Mutex, MutexGuard, RwLock },
 };
 
-use crate::config::Config;
+use crate::config::{ Config, SyncMode };
 use crate::snapshot_set::{ SnapshotInfo, SnapshotSet, SnapshotType, FileSnapshotSet };
 use crate::snapshots::{ SnapshotReader, SnapshotWriter };
 
@@ -110,11 +110,12 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
 
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
         let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, true)?;
+        let snapshot_writer = SnapshotWriter::new(&wal_path.path, true, config.sync_mode);
         let mut self_ = Self {
             config,
             buckets: data,
             snapshot_set: Arc::new(Mutex::new(snapshot_set)),
-            wal: Mutex::new(SnapshotWriter::new(&wal_path.path, true)).into(),
+            wal: Mutex::new(snapshot_writer).into(),
             full_snapshot_writer_thread: None,
             full_snapshot_writer_sender: None,
             update_counter: AtomicU64::new(0),
@@ -252,7 +253,8 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                 .unwrap();
             **wal = SnapshotWriter::new(
                 &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, false).unwrap().path,
-                true
+                true,
+                self.config.sync_mode
             );
 
             let mut raw_data = Vec::new();
@@ -283,7 +285,14 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         snapshot_set: &Mutex<Box<dyn SnapshotSet>>,
         snapshot_task: SnapshotTask
     ) {
-        let mut writer = SnapshotWriter::new(&snapshot_task.snapshot.path, false);
+        // No fsyncs required when writing individual snapshot entries. The implementation
+        // of SnapshotWriter.drop ensures all pending changes are written which is why
+        // we call it explicitly.
+        let mut writer = SnapshotWriter::new(
+            &snapshot_task.snapshot.path,
+            false,
+            SyncMode::NoExplicitSync
+        );
         for (key_range, value_range) in snapshot_task.ranges.iter() {
             writer
                 .append_entry(
@@ -292,6 +301,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                 )
                 .expect("Failed to write full snapshot entry to disk");
         }
+        drop(writer);
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
         snapshot_set
             .lock()

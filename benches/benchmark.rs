@@ -30,26 +30,26 @@ fn random_key_writes<KeyType, F>(n: u64, threads: usize, key: F)
 }
 
 fn writes1(c: &mut Criterion) {
-    c.bench_function("100 random key writes from 1 thread with string keys", |b|
-        b.iter(|| random_key_writes(black_box(100), 1, |i| i.to_string()))
+    c.bench_function("2000 random key writes from 1 thread with string keys", |b|
+        b.iter(|| random_key_writes(black_box(2000), 1, |i| i.to_string()))
     );
-    c.bench_function("100 random key writes from 1 thread with int keys", |b|
-        b.iter(|| random_key_writes(black_box(100), 1, |i| i as i32))
+    c.bench_function("2000 random key writes from 1 thread with int keys", |b|
+        b.iter(|| random_key_writes(black_box(2000), 1, |i| i as i32))
     );
 }
 
-fn writes4(c: &mut Criterion) {
-    c.bench_function("25 random key writes from 4 threads with string keys", |b|
-        b.iter(|| random_key_writes(black_box(25), 8, |i| i.to_string()))
+fn writes8(c: &mut Criterion) {
+    c.bench_function("250 random key writes from 8 threads with string keys", |b|
+        b.iter(|| random_key_writes(black_box(250), 8, |i| i.to_string()))
     );
-    c.bench_function("25 random key writes from 4 threads with int keys", |b|
-        b.iter(|| random_key_writes(black_box(25), 8, |i| i as i32))
+    c.bench_function("250 random key writes from 8 threads with int keys", |b|
+        b.iter(|| random_key_writes(black_box(250), 8, |i| i as i32))
     );
 }
 
 criterion_group! {
     name = writes;
-    config = Criterion::default().sample_size(10);
-    targets = writes1, writes4
+    config = Criterion::default();
+    targets = writes1, writes8
 }
 criterion_main!(writes);

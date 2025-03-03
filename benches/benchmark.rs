@@ -1,17 +1,35 @@
 use std::hint::black_box;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{ criterion_group, criterion_main, Criterion };
+use persistent_kv::{ Config, PersistentKeyValueStore };
+use tempfile::TempDir;
 
-fn fibonacci(n: u64) -> u64 {
-    match n {
-        0 => 1,
-        1 => 1,
-        n => fibonacci(n-1) + fibonacci(n-2),
+fn random_key_writes<KeyType>(n: u64, key: impl Fn(u64) -> KeyType)
+    where KeyType: persistent_kv::SerializableKey
+{
+    let tmp_dir = TempDir::new().unwrap();
+    let store: PersistentKeyValueStore<KeyType, String> = PersistentKeyValueStore::new(
+        tmp_dir.path(),
+        Config::default()
+    ).unwrap();
+
+    for i in 0..n {
+        // Due to hashing, these will come out random-ish
+        store.set(black_box(key(i)), "bar");
     }
 }
 
-fn criterion_benchmark(c: &mut Criterion) {
-    c.bench_function("fib 20", |b| b.iter(|| fibonacci(black_box(20))));
+fn writes1(c: &mut Criterion) {
+    c.bench_function("100 random key writes from 1 thread with string keys", |b|
+        b.iter(|| random_key_writes(black_box(100), |i| i.to_string()))
+    );
+    c.bench_function("100 random key writes from 1 thread with int keys", |b|
+        b.iter(|| random_key_writes(black_box(100), |i| i as i32))
+    );
 }
 
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);
+criterion_group! {
+    name = writes;
+    config = Criterion::default().sample_size(10);
+    targets = writes1
+}
+criterion_main!(writes);

@@ -44,7 +44,6 @@ impl Drop for SnapshotAppendOp {
 
 impl SnapshotWriter {
     
-
     thread_local! {
         static BUFFER: Vec<u8> = const { Vec::new() };
         static ENTRY: SnapshotEntry = SnapshotEntry::default();

@@ -151,6 +151,24 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         Ok(self_)
     }
 
+    /// Returns (number of entries, size in bytes)
+    pub fn compute_size_info(&self) -> (usize, usize) {
+        self.buckets
+            .iter()
+            .map(|e| {
+                let bucket = e.data.read().unwrap();
+                (
+                    bucket.len(),
+                    bucket
+                        .iter()
+                        .map(|(k, v)| k.borrow().len() + v.len())
+                        .sum(),
+                )
+            })
+            .reduce(|(ak, av), (ek, ev)| (ak + ek, av + ev))
+            .unwrap()
+    }
+
     pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &Store<KeyAdapter> {
         let bucket = self.get_bucket_(key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
@@ -230,8 +248,12 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
                         data.insert(key, entry.value.clone());
                     }
                 })
-                .unwrap_or_else(|_|
-                    panic!("Failed to read write-ahead log snapshot: {:?}", snapshot_path)
+                .unwrap_or_else(|e|
+                    panic!(
+                        "Failed to read write-ahead log snapshot {:?} with error: {:?}",
+                        snapshot_path,
+                        e
+                    )
                 );
         }
         Ok(())
@@ -242,7 +264,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         // 1) Allocate the snapshot in a pending state and make a copy of all data now.
         // 2) Instantly switch to a new WAL file with ordinal higher than the pending snapshot
         //   so concurrent writes can continue and will later be applied against this snapshot
-        // 3) Signal the offline thread to carry out the snapshot.
+        // 3) Signal the offline thread to carry out the snapshot, sending the data copy.
         if
             (self.update_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) %
                 self.config.snapshot_interval == 0
@@ -286,8 +308,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         snapshot_task: SnapshotTask
     ) {
         // No fsyncs required when writing individual snapshot entries. The implementation
-        // of SnapshotWriter.drop ensures all pending changes are written which is why
-        // we call it explicitly.
+        // of SnapshotWriter.drop includes a fsync covering all writes to the snapshot.
         let mut writer = SnapshotWriter::new(
             &snapshot_task.snapshot.path,
             false,

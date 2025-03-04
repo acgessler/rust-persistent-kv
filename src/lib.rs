@@ -4,16 +4,16 @@
 //!  - full snapshots that are periodically written to disk
 //!  - write-ahead log (WAL) to capture recent additions
 
+mod store;
+mod config;
+mod snapshots;
+mod snapshot_set;
+
 use std::{ borrow::{ Borrow, Cow }, error::Error, str };
 
 use store::{ FixedLengthKey64Bit, VariableLengthKey, Store, StoreImpl };
 
 pub use config::Config;
-
-mod store;
-mod config;
-mod snapshots;
-mod snapshot_set;
 
 pub struct PersistentKeyValueStore<K, V> {
     store: StoreImpl,
@@ -22,7 +22,7 @@ pub struct PersistentKeyValueStore<K, V> {
 
 // We don't need K to be Sync + Send as we only operate on the serialized version
 // when passing the data between threads internally and the external interface
-// exposes only clones, not references. 
+// exposes only clones, not references.
 unsafe impl<K, V> Sync for PersistentKeyValueStore<K, V> {}
 unsafe impl<K, V> Send for PersistentKeyValueStore<K, V> {}
 
@@ -81,6 +81,22 @@ impl<K, V> PersistentKeyValueStore<K, V>
                 store.unset(key.serialize().borrow());
             }
         }
+    }
+}
+
+impl<K, V> std::fmt::Debug for PersistentKeyValueStore<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (num_elements, num_bytes) = match &self.store {
+            StoreImpl::FixedKey(store) => { store.compute_size_info() }
+            StoreImpl::VariableKey(store) => { store.compute_size_info() }
+        };
+        write!(
+            f,
+            "PersistentKeyValueStore: {} elements and {} KiB total size (key + value)",
+            num_elements,
+            num_bytes / 1024
+        )?;
+        Ok(())
     }
 }
 

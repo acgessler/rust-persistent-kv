@@ -11,6 +11,7 @@ mod snapshot_set;
 
 use std::{ borrow::{ Borrow, Cow }, error::Error, str };
 
+use snapshot_set::FileSnapshotSet;
 use store::{ FixedLengthKey64Bit, VariableLengthKey, Store, StoreImpl };
 
 pub use config::Config;
@@ -39,11 +40,12 @@ impl<K, V> PersistentKeyValueStore<K, V>
     where K: SerializableKey, V: SerializableValue + SerializableKey
 {
     pub fn new(path: &std::path::Path, config: Config) -> Result<Self, Box<dyn Error>> {
+        let snapshot_set = FileSnapshotSet::new(path)?;
         Ok(Self {
             store: if <K as SerializableKey>::IS_FIXED_SIZE {
-                StoreImpl::FixedKey(Store::new(path, config)?)
+                StoreImpl::FixedKey(Store::new(snapshot_set, config)?)
             } else {
-                StoreImpl::VariableKey(Store::new(path, config)?)
+                StoreImpl::VariableKey(Store::new(snapshot_set, config)?)
             },
             phantom: std::marker::PhantomData,
         })

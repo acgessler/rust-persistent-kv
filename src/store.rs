@@ -4,7 +4,6 @@ use std::{
     error::Error,
     hash::{ DefaultHasher, Hash, Hasher },
     ops::Range,
-    path::Path,
     sync::{ atomic::AtomicU64, Arc, Mutex, MutexGuard, RwLock },
 };
 
@@ -22,13 +21,7 @@ pub struct FixedLengthKey64Bit(pub [u8; 8]);
 #[derive(Clone, PartialEq, Hash, Eq, Default)]
 pub struct VariableLengthKey(pub Vec<u8>);
 
-pub trait SwitchKeyAdapter: Clone +
-    PartialEq +
-    Hash +
-    Eq +
-    Borrow<[u8]> +
-    ToOwned +
-    From<Vec<u8>> {}
+pub trait KeyAdapter: Clone + PartialEq + Hash + Eq + Borrow<[u8]> + ToOwned + From<Vec<u8>> {}
 
 impl Borrow<[u8]> for FixedLengthKey64Bit {
     fn borrow(&self) -> &[u8] {
@@ -56,24 +49,24 @@ impl From<Vec<u8>> for VariableLengthKey {
     }
 }
 
-impl SwitchKeyAdapter for FixedLengthKey64Bit {}
-impl SwitchKeyAdapter for VariableLengthKey {}
+impl KeyAdapter for FixedLengthKey64Bit {}
+impl KeyAdapter for VariableLengthKey {}
 
 // Hardcoded underlying implementations of store to keep generic interface small.
 pub enum StoreImpl {
-    FixedKey(Store<FixedLengthKey64Bit>),
-    VariableKey(Store<VariableLengthKey>),
+    FixedKey(Store<FixedLengthKey64Bit, FileSnapshotSet>),
+    VariableKey(Store<VariableLengthKey, FileSnapshotSet>),
 }
 
-struct Bucket<KeyAdapter> {
-    data: Arc<RwLock<HashMap<KeyAdapter, Vec<u8>>>>,
+struct Bucket<TKey: KeyAdapter> {
+    data: Arc<RwLock<HashMap<TKey, Vec<u8>>>>,
 }
 
-pub struct Store<KeyAdapter: SwitchKeyAdapter> {
+pub struct Store<TKey: KeyAdapter, TSnapshotSet: SnapshotSet> {
     config: Config,
-    buckets: Vec<Bucket<KeyAdapter>>, // TODO: cache
+    buckets: Vec<Bucket<TKey>>, // TODO: cache
     wal: Arc<Mutex<SnapshotWriter>>,
-    snapshot_set: Arc<Mutex<Box<dyn SnapshotSet>>>,
+    snapshot_set: Arc<Mutex<TSnapshotSet>>,
     update_counter: AtomicU64,
     full_snapshot_writer_thread: Option<std::thread::JoinHandle<()>>,
     full_snapshot_writer_sender: Option<std::sync::mpsc::Sender<SnapshotTask>>,
@@ -85,22 +78,15 @@ struct SnapshotTask {
     snapshot: SnapshotInfo,
 }
 
-impl<KeyAdapter> Drop for Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
+impl<TKey: KeyAdapter, TSS: SnapshotSet> Drop for Store<TKey, TSS> {
     fn drop(&mut self) {
         self.full_snapshot_writer_sender = None;
         self.full_snapshot_writer_thread.take().unwrap().join().unwrap();
     }
 }
 
-impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
-    pub fn new(path: &Path, config: Config) -> Result<Self, Box<dyn Error>> {
-        Self::new_with_snapshot_set(Box::new(FileSnapshotSet::new(path)?), config)
-    }
-
-    pub fn new_with_snapshot_set(
-        mut snapshot_set: Box<dyn SnapshotSet>,
-        config: Config
-    ) -> Result<Self, Box<dyn Error>> {
+impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
+    pub fn new(mut snapshot_set: TSS, config: Config) -> Result<Self, Box<dyn Error>> {
         let mut data = Vec::with_capacity(config.memory_bucket_count);
         for _ in 0..config.memory_bucket_count {
             data.push(Bucket {
@@ -169,7 +155,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
             .unwrap()
     }
 
-    pub fn set(&self, key: KeyAdapter, value: Vec<u8>) -> &Store<KeyAdapter> {
+    pub fn set(&self, key: TKey, value: Vec<u8>) -> &Store<TKey, TSS> {
         let bucket = self.get_bucket_(key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistent w.r.t. the in-memory map.
@@ -192,7 +178,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         self
     }
 
-    pub fn unset(&self, key: &[u8]) -> &Store<KeyAdapter> {
+    pub fn unset(&self, key: &[u8]) -> &Store<TKey, TSS> {
         let bucket = self.get_bucket_(key);
 
         // See notes on lock usage in set()
@@ -220,7 +206,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         bucket.data.read().unwrap().get(key).cloned()
     }
 
-    fn get_bucket_(&self, key: &[u8]) -> &Bucket<KeyAdapter> {
+    fn get_bucket_(&self, key: &[u8]) -> &Bucket<TKey> {
         let hash = Self::hash_(key);
         let index = hash % (self.config.memory_bucket_count as u64);
         &self.buckets[index as usize]
@@ -238,7 +224,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         for snapshot_path in snapshots_to_restore {
             SnapshotReader::new(&snapshot_path.path)
                 .read_entries(|entry| {
-                    let key: KeyAdapter = entry.key.to_owned().into();
+                    let key: TKey = entry.key.to_owned().into();
                     let bucket = self.get_bucket_(key.borrow());
                     let mut data = bucket.data.write().unwrap();
 
@@ -303,10 +289,7 @@ impl<KeyAdapter> Store<KeyAdapter> where KeyAdapter: SwitchKeyAdapter {
         }
     }
 
-    fn write_and_finalize_snapshot_(
-        snapshot_set: &Mutex<Box<dyn SnapshotSet>>,
-        snapshot_task: SnapshotTask
-    ) {
+    fn write_and_finalize_snapshot_(snapshot_set: &Mutex<TSS>, snapshot_task: SnapshotTask) {
         // No fsyncs required when writing individual snapshot entries. The implementation
         // of SnapshotWriter.drop includes a fsync covering all writes to the snapshot.
         let mut writer = SnapshotWriter::new(
@@ -347,83 +330,76 @@ mod tests {
         File::open(path).unwrap().metadata().unwrap().len()
     }
 
+    fn create_store(tmp_dir: &TempDir) -> Store<VariableLengthKey, FileSnapshotSet> {
+        Store::new(FileSnapshotSet::new(tmp_dir.path()).unwrap(), Config::default()).unwrap()
+    }
+    fn create_store_custom_config(
+        tmp_dir: &TempDir,
+        config: Config
+    ) -> Store<VariableLengthKey, FileSnapshotSet> {
+        Store::new(FileSnapshotSet::new(tmp_dir.path()).unwrap(), config).unwrap()
+    }
+
     #[test]
     fn setget() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
-            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-            store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
-            assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
-            assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
-        }
-        {
-            let store2: Store<VariableLengthKey> = Store::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            assert_eq!(store2.get(b"foo"), Some(b"1".to_vec()));
-            assert_eq!(store2.get(b"bar"), Some(b"2".to_vec()));
-        }
+
+        let store = create_store(&tmp_dir);
+        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
+        assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
+        assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
+        drop(store);
+
+        let store2 = create_store(&tmp_dir);
+        assert_eq!(store2.get(b"foo"), Some(b"1".to_vec()));
+        assert_eq!(store2.get(b"bar"), Some(b"2".to_vec()));
     }
 
     #[test]
     fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
-            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-            assert_eq!(store.get(b"bar"), None);
-        }
-        {
-            let store2: Store<VariableLengthKey> = Store::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            assert_eq!(store2.get(b"bar"), None);
-        }
+        let store = create_store(&tmp_dir);
+        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        assert_eq!(store.get(b"bar"), None);
+        drop(store);
+
+        let store2 = create_store(&tmp_dir);
+        assert_eq!(store2.get(b"bar"), None);
     }
 
     #[test]
     fn set_overwrite() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
-            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-            store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
-            assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
-            assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
-            store.set(VariableLengthKey(b"bar".to_vec()), b"3".to_vec());
-            assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
-            assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
-        }
-        {
-            let store2: Store<VariableLengthKey> = Store::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            assert_eq!(store2.get(b"foo"), Some(b"1".to_vec()));
-            assert_eq!(store2.get(b"bar"), Some(b"3".to_vec()));
-        }
+
+        let store = create_store(&tmp_dir);
+        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
+        assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
+        assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
+        store.set(VariableLengthKey(b"bar".to_vec()), b"3".to_vec());
+        assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
+        assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
+        drop(store);
+
+        let store2 = create_store(&tmp_dir);
+        assert_eq!(store2.get(b"foo"), Some(b"1".to_vec()));
+        assert_eq!(store2.get(b"bar"), Some(b"3".to_vec()));
     }
 
     #[test]
     fn unset() {
         let tmp_dir = TempDir::new().unwrap();
-        {
-            let store = Store::new(tmp_dir.path(), Config::default()).unwrap();
-            store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-            assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
-            store.unset(b"foo");
-            assert_eq!(store.get(b"foo"), None);
-        }
-        {
-            let store2: Store<VariableLengthKey> = Store::new(
-                tmp_dir.path(),
-                Config::default()
-            ).unwrap();
-            assert_eq!(store2.get(b"foo"), None);
-        }
+
+        let store = create_store(&tmp_dir);
+        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
+        store.unset(b"foo");
+        assert_eq!(store.get(b"foo"), None);
+        drop(store);
+
+        let store2 = create_store(&tmp_dir);
+        assert_eq!(store2.get(b"foo"), None);
     }
 
     #[test]
@@ -431,11 +407,10 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
 
         // Create a store and set one key to trigger a snapshot.
-        let mut config = Config::default();
-        config.snapshot_interval = 1;
-        Store::new(tmp_dir.path(), config.clone())
-            .unwrap()
-            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        create_store_custom_config(&tmp_dir, Config {
+            snapshot_interval: 1,
+            ..Config::default()
+        }).set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
 
         // Verify existence of snapshot files directly:
         //  (Ord=1, Diff) used to be the write-ahead log and has been deleted.
@@ -453,10 +428,10 @@ mod tests {
 
         // Create a fresh store instance and make a modification to two more keys (triggers
         // snapshot) and then delete a third (does not trigger snapshot)
-        let mut config = Config::default();
-        config.snapshot_interval = 2;
-        Store::new(tmp_dir.path(), config.clone())
-            .unwrap()
+        create_store_custom_config(&tmp_dir, Config {
+            snapshot_interval: 2,
+            ..Config::default()
+        })
             .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
             .set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec())
             .unset(b"foo");

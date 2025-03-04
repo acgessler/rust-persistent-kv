@@ -251,6 +251,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         // 2) Instantly switch to a new WAL file with ordinal higher than the pending snapshot
         //   so concurrent writes can continue and will later be applied against this snapshot
         // 3) Signal the offline thread to carry out the snapshot, sending the data copy.
+        //
+        // Taking a full data copy on the write path has the advantage that the output is
+        // deterministic and corresponds exactly to the state of the store after N writes.
+        // The downside is significant latency for every 1/snapshot_interval write request.
         if
             (self.update_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) %
                 self.config.snapshot_interval == 0
@@ -310,7 +314,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         snapshot_set
             .lock()
             .unwrap()
-            .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true)
+            .publish_completed_snapshot(snapshot_task.snapshot.ordinal, true, true)
             .unwrap();
         println!(
             "PersistentKeyValueStore: published snapshot with ID {}",
@@ -321,7 +325,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::{ fs::File, path::Path };
 
     use super::*;
     use tempfile::TempDir;

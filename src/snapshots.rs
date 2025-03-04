@@ -19,8 +19,6 @@ pub struct SnapshotEntry {
 
 pub struct SnapshotWriter {
     file: Arc<File>,
-    buffer: Vec<u8>,
-    entry: SnapshotEntry,
     sync_mode: SyncMode,
 }
 
@@ -45,13 +43,18 @@ impl Drop for SnapshotAppendOp {
 }
 
 impl SnapshotWriter {
+    
+
+    thread_local! {
+        static BUFFER: Vec<u8> = const { Vec::new() };
+        static ENTRY: SnapshotEntry = SnapshotEntry::default();
+    }
+
     pub fn new(path: &Path, append: bool, sync_mode: SyncMode) -> Self {
         Self {
             file: Arc::new(
                 OpenOptions::new().write(true).append(append).create(true).open(path).unwrap()
             ),
-            buffer: Vec::new(),
-            entry: SnapshotEntry::default(),
             sync_mode,
         }
     }
@@ -62,16 +65,18 @@ impl SnapshotWriter {
         value: Option<&[u8]>
     ) -> Result<SnapshotAppendOp, Box<dyn std::error::Error>> {
         // Reuse entry and byte buffer memory to avoid unnecessary allocations
-        self.entry.value.clear();
+        let mut entry = Self::ENTRY.with(|entry| entry.clone());
+        let mut buffer = Self::BUFFER.with(|buffer| buffer.clone());
+        entry.value.clear();
         if let Some(value) = value {
-            self.entry.value.extend_from_slice(value);
+            entry.value.extend_from_slice(value);
         }
-        self.entry.key.clear();
-        self.entry.key.extend_from_slice(key);
+        entry.key.clear();
+        entry.key.extend_from_slice(key);
 
-        self.buffer.clear();
-        self.entry.encode_length_delimited(&mut self.buffer)?;
-        self.file.write_all(&self.buffer)?;
+        buffer.clear();
+        entry.encode_length_delimited(&mut buffer)?;
+        self.file.write_all(&buffer)?;
 
         Ok(SnapshotAppendOp {
             file: self.file.clone(),
@@ -101,7 +106,7 @@ impl SnapshotReader {
         where F: FnMut(&SnapshotEntry)
     {
         // TODO(acgessler): Deal with broken/partly written entries.
-        const CAP: usize = 2048;
+        const CAP: usize = 1 << 16;
         let mut reader = BufReader::with_capacity(CAP, &self.file);
         let mut entry = SnapshotEntry::default();
 

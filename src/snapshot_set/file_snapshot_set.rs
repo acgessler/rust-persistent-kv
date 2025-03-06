@@ -535,15 +535,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "Cannot create completed snapshot directly, use publish_completed_snapshot()"
+    )]
     fn registers_new_snapshot_path_rejects_full_completed_type() {
         let tmp_dir = create_temp_dir();
 
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
-        let error = snapshot_set
+        snapshot_set
             .create_or_get_snapshot(SnapshotType::FullCompleted, 1, true)
-            .map_err(|e| e.kind());
-        assert_eq!(error, Err(io::ErrorKind::InvalidInput));
+            .unwrap();
     }
 
     #[test]

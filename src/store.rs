@@ -5,7 +5,8 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock}, time::Instant,
+    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    time::Instant,
 };
 
 use crate::config::{Config, SyncMode};
@@ -67,26 +68,23 @@ struct Bucket<TKey: KeyAdapter> {
     data: Arc<RwLock<HashMap<TKey, Vec<u8>>>>,
 }
 
-pub struct Store<TKey: KeyAdapter, TSnapshotSet: SnapshotSet> {
+struct SnapshotTask;
+
+pub struct Store<TKey: KeyAdapter, TSS: SnapshotSet + 'static> {
     config: Config,
     buckets: Vec<Bucket<TKey>>, // TODO: cache
     wal: Arc<Mutex<SnapshotWriter>>,
-    snapshot_set: Arc<Mutex<TSnapshotSet>>,
+    snapshot_set: Arc<Mutex<TSS>>,
     update_counter: AtomicU64,
     full_snapshot_writer_thread: Option<std::thread::JoinHandle<()>>,
     full_snapshot_writer_sender: Option<std::sync::mpsc::Sender<SnapshotTask>>,
 }
 
-struct SnapshotTask;
-
-impl<TKey: KeyAdapter, TSS: SnapshotSet> Drop for Store<TKey, TSS> {
+impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Drop for Store<TKey, TSS> {
     fn drop(&mut self) {
-        self.full_snapshot_writer_sender = None;
-        self.full_snapshot_writer_thread
-            .take()
-            .unwrap()
-            .join()
-            .unwrap();
+        if self.full_snapshot_writer_thread.is_some() {
+            self.stop_snapshot_writer_thread_();
+        }
     }
 }
 
@@ -116,34 +114,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         // if available, and then replay all write-ahead log entries since that snapshot.
         self_.restore_from_snapshots_()?;
 
-        // Start a thread that periodically writes full snapshots to disk.
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let snapshot_set = self_.snapshot_set.clone();
-        let wal_ref = self_.wal.clone();
-        let buckets_ref = self_.buckets.clone();
-        self_.full_snapshot_writer_sender = Some(sender);
-        self_.full_snapshot_writer_thread = Some(std::thread::spawn(move || {
-            loop {
-                match receiver.recv() {
-                    Err(_) => {
-                        break;
-                    }
-                    Ok(mut snapshot_task) => {
-                        // Skip over any queued snapshots that we're not keeping up with and process the latest only.
-                        while let Ok(queued_snapshot_task) = receiver.try_recv() {
-                            snapshot_task = queued_snapshot_task;
-                        }
-                        Self::write_and_finalize_snapshot_(
-                            &wal_ref,
-                            &buckets_ref,
-                            &snapshot_set,
-                            snapshot_task,
-                        );
-                    }
-                }
-            }
-        }));
-
+        self_.start_snapshot_writer_thread_();
         Ok(self_)
     }
 
@@ -213,6 +184,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         bucket.data.read().unwrap().get(key).cloned()
     }
 
+    #[cfg(test)]
+    pub fn testonly_wait_for_pending_snapshots(&mut self) -> &mut Store<TKey, TSS> {
+        self.stop_snapshot_writer_thread_();
+        self.start_snapshot_writer_thread_();
+        self
+    }
+
     fn get_bucket_(&self, key: &[u8]) -> &Bucket<TKey> {
         let hash = Self::hash_(key);
         let index = hash % (self.config.memory_bucket_count as u64);
@@ -226,9 +204,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     }
 
     fn restore_from_snapshots_(&mut self) -> Result<(), Box<dyn Error>> {
+        let start_time = Instant::now();
         let snapshot_set = self.snapshot_set.lock().unwrap();
         let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
-        for snapshot_path in snapshots_to_restore {
+        for snapshot_path in snapshots_to_restore.iter() {
             SnapshotReader::new(&snapshot_path.path)
                 .read_entries(|entry| {
                     let key: TKey = entry.key.to_owned().into();
@@ -248,7 +227,57 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                     )
                 });
         }
+        let elapsed = start_time.elapsed();
+        println!(
+            "PersistentKeyValueStore: restored from snapshots with IDs {:?}; duration: {:?}",
+            snapshots_to_restore
+                .iter()
+                .map(|e| e.ordinal)
+                .collect::<Vec<u64>>(),
+            elapsed
+        );
         Ok(())
+    }
+
+    fn start_snapshot_writer_thread_(&mut self) {
+        assert!(self.full_snapshot_writer_thread.is_none());
+        // Start a thread that periodically writes full snapshots to disk.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let snapshot_set = self.snapshot_set.clone();
+        let wal_ref = self.wal.clone();
+        let buckets_ref = self.buckets.clone();
+        self.full_snapshot_writer_sender = Some(sender);
+        self.full_snapshot_writer_thread = Some(std::thread::spawn(move || {
+            loop {
+                match receiver.recv() {
+                    Err(_) => {
+                        break;
+                    }
+                    Ok(mut snapshot_task) => {
+                        // Skip over any queued snapshots that we're not keeping up with and process the latest only.
+                        while let Ok(queued_snapshot_task) = receiver.try_recv() {
+                            snapshot_task = queued_snapshot_task;
+                        }
+                        Self::write_and_finalize_snapshot_(
+                            &wal_ref,
+                            &buckets_ref,
+                            &snapshot_set,
+                            snapshot_task,
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    fn stop_snapshot_writer_thread_(&mut self) {
+        assert!(self.full_snapshot_writer_thread.is_some());
+        self.full_snapshot_writer_sender = None;
+        self.full_snapshot_writer_thread
+            .take()
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     fn maybe_trigger_full_snapshot_(&self) {
@@ -382,7 +411,6 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
-
     fn file_length_in_bytes(path: &Path) -> u64 {
         File::open(path).unwrap().metadata().unwrap().len()
     }
@@ -501,16 +529,18 @@ mod tests {
 
         // Create a fresh store instance and make a modification to two more keys (triggers
         // snapshot) and then delete a third (does not trigger snapshot)
-        create_store_custom_config(
+        let mut store = create_store_custom_config(
             &tmp_dir,
             Config {
                 snapshot_interval: 2,
                 ..Config::default()
             },
-        )
-        .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
-        .set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec())
-        .unset(b"foo");
+        );
+        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
+        store.set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec());
+        store.testonly_wait_for_pending_snapshots();
+        store.unset(b"foo");
+        drop(store);
 
         // Verify existence of snapshot files directly again.
         //  (Ord=2, Full) is the previous snapshot containing key `foo`

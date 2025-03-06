@@ -9,7 +9,7 @@ use std::{
     time::Instant,
 };
 
-use crate::config::{Config, SyncMode};
+use crate::{config::{Config, SyncMode}, snapshot_set::SnapshotOrdinal};
 use crate::snapshot_set::{FileSnapshotSet, SnapshotSet, SnapshotType};
 use crate::snapshots::{SnapshotReader, SnapshotWriter};
 
@@ -233,7 +233,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             snapshots_to_restore
                 .iter()
                 .map(|e| e.ordinal)
-                .collect::<Vec<u64>>(),
+                .collect::<Vec<SnapshotOrdinal>>(),
             elapsed
         );
         Ok(())
@@ -409,6 +409,8 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
 mod tests {
     use std::{fs::File, path::Path};
 
+    use crate::snapshot_set::SnapshotOrdinal;
+
     use super::*;
     use tempfile::TempDir;
     fn file_length_in_bytes(path: &Path) -> u64 {
@@ -511,12 +513,12 @@ mod tests {
         //  (Ord=3, Diff) is the new write-ahead log, which is empty.
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 2);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
         assert_eq!(
             snapshot_set.snapshots[0].snapshot_type,
             SnapshotType::FullCompleted
         );
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(3));
         assert_eq!(snapshot_set.snapshots[1].snapshot_type, SnapshotType::Diff);
         assert!(
             File::open(&snapshot_set.snapshots[1].shard_paths[0])
@@ -548,17 +550,17 @@ mod tests {
         //  (Ord=5, Diff) is the new write-ahead log which contains the deletion of `foo` (non-empty)
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 3);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
         assert_eq!(
             snapshot_set.snapshots[0].snapshot_type,
             SnapshotType::FullCompleted
         );
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
         assert_eq!(
             snapshot_set.snapshots[1].snapshot_type,
             SnapshotType::FullCompleted
         );
-        assert_eq!(snapshot_set.snapshots[2].ordinal, 5);
+        assert_eq!(snapshot_set.snapshots[2].ordinal, SnapshotOrdinal(5));
         assert_eq!(snapshot_set.snapshots[2].snapshot_type, SnapshotType::Diff);
         assert!(
             file_length_in_bytes(&snapshot_set.snapshots[0].shard_paths[0])

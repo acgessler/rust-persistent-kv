@@ -20,12 +20,24 @@ pub enum SnapshotType {
     Pending,
 }
 
-type SnapshotOrdinal = u64;
+/// Ordinal number type used for sequencing snapshots. Snapshots with higher ordinal numbers must
+/// be applied after snapshots with lower ordinal numbers. Shards of the same snapshot can be
+/// applied in parallel.
+#[derive(PartialEq, PartialOrd, Eq, Ord, Hash, Clone, Debug, Copy)]
+pub struct SnapshotOrdinal(pub u64);
 
+impl std::fmt::Display for SnapshotOrdinal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Information about a snapshot. Always matches the state on disk, i.e. if a snapshot has
+/// a SnapshotInfo instance the corresponding files also exist, though they may be empty.
 #[derive(Clone, PartialEq, Debug)]
 pub struct SnapshotInfo {
     pub snapshot_type: SnapshotType,
-    pub ordinal: u64,
+    pub ordinal: SnapshotOrdinal,
     // Paths to the different shards that make up the snapshot. Shards are guaranteed
     // to contain distinct keys and can thus be read in parallel.
     //
@@ -128,12 +140,11 @@ impl SnapshotSet for FileSnapshotSet {
         shard_count: u64,
         may_append_existing: bool,
     ) -> Result<SnapshotInfo, io::Error> {
-        if snapshot_type == SnapshotType::FullCompleted {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Cannot create completed snapshot directly, use publish_completed_snapshot()",
-            ));
-        }
+        assert!(shard_count > 0);
+        assert!(
+            snapshot_type != SnapshotType::FullCompleted,
+            "Cannot create completed snapshot directly, use publish_completed_snapshot()"
+        );
         if may_append_existing {
             let latest_diff_snapshot = self
                 .snapshots
@@ -225,7 +236,7 @@ impl SnapshotSet for FileSnapshotSet {
                 snapshots_to_restore.push(snapshot);
                 snapshot.ordinal
             }
-            None => 0,
+            None => SnapshotOrdinal(0),
         };
         snapshots_to_restore.append(&mut self.get_all_diff_snapshots_since(last_snapshot_ordinal));
         snapshots_to_restore
@@ -285,8 +296,8 @@ impl FileSnapshotSet {
     pub fn new(folder: &Path) -> Result<Self, &str> {
         // Scan the folder for all files matching snapshot pattern and map them to SnapshotInfo.
         let mut snapshots: Vec<SnapshotInfo> = Vec::new();
-        let mut seen_shards: HashSet<(u64, u64)> = HashSet::new();
-        let mut info_by_ordinal: HashMap<u64, (u64, SnapshotType)> = HashMap::new();
+        let mut seen_shards: HashSet<(SnapshotOrdinal, u64)> = HashSet::new();
+        let mut info_by_ordinal: HashMap<SnapshotOrdinal, (u64, SnapshotType)> = HashMap::new();
         for entry in fs::read_dir(folder).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
@@ -350,7 +361,10 @@ impl FileSnapshotSet {
     /// Returns all differential snapshots that have been created since the snapshot
     /// with the given ordinal number. This is useful to determine which differential snapshots
     /// need to be applied to the full snapshot to get the latest state.
-    pub fn get_all_diff_snapshots_since(&self, last_full_ordinal: u64) -> Vec<&SnapshotInfo> {
+    pub fn get_all_diff_snapshots_since(
+        &self,
+        last_full_ordinal: SnapshotOrdinal,
+    ) -> Vec<&SnapshotInfo> {
         self.snapshots
             .iter()
             .filter(|snapshot| {
@@ -381,17 +395,19 @@ impl FileSnapshotSet {
         Ok(self.snapshots.last().unwrap())
     }
 
-    fn get_next_ordinal_number_(&self) -> u64 {
-        self.snapshots
-            .iter()
-            .map(|snapshot| snapshot.ordinal)
-            .max()
-            .unwrap_or(0)
-            + 1
+    fn get_next_ordinal_number_(&self) -> SnapshotOrdinal {
+        SnapshotOrdinal(
+            self.snapshots
+                .iter()
+                .map(|snapshot| snapshot.ordinal.0)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        )
     }
 
     fn generate_snapshot_filename_(
-        ordinal: u64,
+        ordinal: SnapshotOrdinal,
         shard: u64,
         shard_count: u64,
         snapshot_type: SnapshotType,
@@ -403,15 +419,15 @@ impl FileSnapshotSet {
         };
         format!(
             "snapshot_{}_{}-of-{}_{}.bin",
-            ordinal, shard, shard_count, snapshot_type_str
+            ordinal.0, shard, shard_count, snapshot_type_str
         )
     }
 
-    fn parse_snapshot_filename_(path: &Path) -> Option<(u64, u64, u64, SnapshotType)> {
+    fn parse_snapshot_filename_(path: &Path) -> Option<(SnapshotOrdinal, u64, u64, SnapshotType)> {
         let filename = path.file_name().unwrap().to_str().unwrap();
         let re = Regex::new(r"^snapshot_(\d+)_(\d+)-of-(\d+)_(diff|full|pending)\.bin$").unwrap();
         let captures = re.captures(filename)?;
-        let ordinal = captures[1].parse().unwrap();
+        let ordinal = SnapshotOrdinal(captures[1].parse().unwrap());
         let shard = captures[2].parse().unwrap();
         let shard_count = captures[3].parse().unwrap();
         let snapshot_type = match &captures[4] {
@@ -465,7 +481,7 @@ mod tests {
             snapshot_set.snapshots[0],
             SnapshotInfo {
                 shard_paths: vec![tmp_dir.path().join("snapshot_1_0-of-1_diff.bin")],
-                ordinal: 1,
+                ordinal: SnapshotOrdinal(1),
                 snapshot_type: SnapshotType::Diff,
             }
         );
@@ -473,7 +489,7 @@ mod tests {
             snapshot_set.snapshots[1],
             SnapshotInfo {
                 shard_paths: vec![tmp_dir.path().join("snapshot_2_0-of-1_full.bin")],
-                ordinal: 2,
+                ordinal: SnapshotOrdinal(2),
                 snapshot_type: SnapshotType::FullCompleted,
             }
         );
@@ -481,7 +497,7 @@ mod tests {
             snapshot_set.snapshots[2],
             SnapshotInfo {
                 shard_paths: vec![tmp_dir.path().join("snapshot_3_0-of-1_pending.bin")],
-                ordinal: 3,
+                ordinal: SnapshotOrdinal(3),
                 snapshot_type: SnapshotType::Pending,
             }
         );
@@ -489,7 +505,7 @@ mod tests {
             snapshot_set.snapshots[3],
             SnapshotInfo {
                 shard_paths: vec![tmp_dir.path().join("snapshot_4_0-of-1_diff.bin")],
-                ordinal: 4,
+                ordinal: SnapshotOrdinal(4),
                 snapshot_type: SnapshotType::Diff,
             }
         );
@@ -601,8 +617,14 @@ mod tests {
         // Construct a new SnapShotSet to verify that the files were created on disk
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 5);
-        assert_eq!(snapshot_set.snapshots[3].ordinal, 900000000001);
-        assert_eq!(snapshot_set.snapshots[4].ordinal, 900000000002);
+        assert_eq!(
+            snapshot_set.snapshots[3].ordinal,
+            SnapshotOrdinal(900000000001)
+        );
+        assert_eq!(
+            snapshot_set.snapshots[4].ordinal,
+            SnapshotOrdinal(900000000002)
+        );
         assert_eq!(snapshot_set.snapshots[3].shard_paths.len(), 2);
         assert_eq!(snapshot_set.snapshots[3].shard_paths.len(), 2);
     }
@@ -699,7 +721,7 @@ mod tests {
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         let latest_full_snapshot = snapshot_set.get_latest_full_snapshot().unwrap();
 
-        assert_eq!(latest_full_snapshot.ordinal, 3);
+        assert_eq!(latest_full_snapshot.ordinal, SnapshotOrdinal(3));
     }
 
     #[test]
@@ -718,8 +740,8 @@ mod tests {
             snapshot_set.get_all_diff_snapshots_since(latest_full_snapshot.ordinal);
 
         assert_eq!(diff_snapshots.len(), 2);
-        assert_eq!(diff_snapshots[0].ordinal, 5);
-        assert_eq!(diff_snapshots[1].ordinal, 9999);
+        assert_eq!(diff_snapshots[0].ordinal, SnapshotOrdinal(5));
+        assert_eq!(diff_snapshots[1].ordinal, SnapshotOrdinal(9999));
     }
 
     #[test]
@@ -732,27 +754,27 @@ mod tests {
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         snapshot_set
-            .publish_completed_snapshot(3, true, false)
+            .publish_completed_snapshot(SnapshotOrdinal(3), true, false)
             .unwrap();
 
         // Verify that the existing snapshot set reflects the correct change.
         assert_eq!(snapshot_set.snapshots.len(), 2);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
         assert_eq!(
             snapshot_set.snapshots[0].snapshot_type,
             SnapshotType::FullCompleted
         );
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
 
         // Construct a new SnapShotSet to verify that the file changes actually hit disk.
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 2);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
         assert_eq!(
             snapshot_set.snapshots[0].snapshot_type,
             SnapshotType::FullCompleted
         );
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
     }
 
     #[test]
@@ -763,17 +785,17 @@ mod tests {
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         snapshot_set
-            .publish_completed_snapshot(2, false, true)
+            .publish_completed_snapshot(SnapshotOrdinal(2), false, true)
             .unwrap();
 
         // Verify that the existing snapshot set reflects the correct change.
         assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
 
         // Construct a new SnapShotSet to verify that the file changes actually hit disk.
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
     }
 
     #[test]
@@ -783,7 +805,7 @@ mod tests {
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         let error = snapshot_set
-            .publish_completed_snapshot(1, true, true)
+            .publish_completed_snapshot(SnapshotOrdinal(1), true, true)
             .map_err(|e| e.kind());
 
         assert_eq!(error, Err(io::ErrorKind::AlreadyExists));
@@ -796,7 +818,7 @@ mod tests {
         let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         let error = snapshot_set
-            .publish_completed_snapshot(2, true, true)
+            .publish_completed_snapshot(SnapshotOrdinal(2), true, true)
             .map_err(|e| e.kind());
 
         assert_eq!(error, Err(io::ErrorKind::NotFound));
@@ -815,9 +837,9 @@ mod tests {
         let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
 
         assert_eq!(snapshots_to_restore.len(), 3);
-        assert_eq!(snapshots_to_restore[0].ordinal, 2);
-        assert_eq!(snapshots_to_restore[1].ordinal, 3);
-        assert_eq!(snapshots_to_restore[2].ordinal, 5);
+        assert_eq!(snapshots_to_restore[0].ordinal, SnapshotOrdinal(2));
+        assert_eq!(snapshots_to_restore[1].ordinal, SnapshotOrdinal(3));
+        assert_eq!(snapshots_to_restore[2].ordinal, SnapshotOrdinal(5));
     }
 
     #[test]
@@ -839,17 +861,17 @@ mod tests {
         snapshot_set.prune_backup_snapshots(1).unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 3);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 4);
-        assert_eq!(snapshot_set.snapshots[2].ordinal, 5);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
+        assert_eq!(snapshot_set.snapshots[2].ordinal, SnapshotOrdinal(5));
 
         // Construct a new SnapShotSet to verify that the files were actually deleted.
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         snapshot_set.prune_backup_snapshots(0).unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 2);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 3);
-        assert_eq!(snapshot_set.snapshots[1].ordinal, 5);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
+        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(5));
     }
 
     #[test]
@@ -865,12 +887,12 @@ mod tests {
         snapshot_set.prune_not_completed_snapshots().unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
 
         // Construct a new SnapShotSet to verify that the files were actually deleted.
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, 2);
+        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
     }
 }

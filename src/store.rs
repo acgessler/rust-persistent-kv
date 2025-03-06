@@ -98,8 +98,8 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         }
 
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
-        let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, true)?;
-        let snapshot_writer = SnapshotWriter::new(&wal_path.path, true, config.sync_mode);
+        let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, 1, true)?;
+        let snapshot_writer = SnapshotWriter::new(&wal_path.shard_paths[0], true, config.sync_mode);
         let mut self_ = Self {
             config,
             buckets: data,
@@ -208,7 +208,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         let snapshot_set = self.snapshot_set.lock().unwrap();
         let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
         for snapshot_path in snapshots_to_restore.iter() {
-            SnapshotReader::new(&snapshot_path.path)
+            SnapshotReader::new(&snapshot_path.shard_paths[0])
                 .read_entries(|entry| {
                     let key: TKey = entry.key.to_owned().into();
                     let bucket = self.get_bucket_(key.borrow());
@@ -327,20 +327,20 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             // we can atomically switch to a new WAL file.
             let mut wal_ref = wal_ref.lock().unwrap();
             let pending_snapshot = snapshot_set
-                .create_or_get_snapshot(SnapshotType::Pending, false)
+                .create_or_get_snapshot(SnapshotType::Pending, 1, false)
                 .unwrap();
             *wal_ref = SnapshotWriter::new(
                 &snapshot_set
-                    .create_or_get_snapshot(SnapshotType::Diff, false)
+                    .create_or_get_snapshot(SnapshotType::Diff, 1, false)
                     .unwrap()
-                    .path,
+                    .shard_paths[0],
                 true,
                 wal_ref.sync_mode,
             );
             pending_snapshot
         };
 
-        Self::write_buckets_to_snapshot_(&pending_snapshot.path, buckets);
+        Self::write_buckets_to_snapshot_(&pending_snapshot.shard_paths[0], buckets);
 
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
         snapshot_set
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[1].ordinal, 3);
         assert_eq!(snapshot_set.snapshots[1].snapshot_type, SnapshotType::Diff);
         assert!(
-            File::open(&snapshot_set.snapshots[1].path)
+            File::open(&snapshot_set.snapshots[1].shard_paths[0])
                 .unwrap()
                 .metadata()
                 .unwrap()
@@ -561,9 +561,9 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[2].ordinal, 5);
         assert_eq!(snapshot_set.snapshots[2].snapshot_type, SnapshotType::Diff);
         assert!(
-            file_length_in_bytes(&snapshot_set.snapshots[0].path)
-                < file_length_in_bytes(&snapshot_set.snapshots[1].path)
+            file_length_in_bytes(&snapshot_set.snapshots[0].shard_paths[0])
+                < file_length_in_bytes(&snapshot_set.snapshots[1].shard_paths[0])
         );
-        assert!(file_length_in_bytes(&snapshot_set.snapshots[2].path) > 0);
+        assert!(file_length_in_bytes(&snapshot_set.snapshots[2].shard_paths[0]) > 0);
     }
 }

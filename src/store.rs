@@ -2,11 +2,10 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     error::Error,
-    future::Pending,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{atomic::AtomicU64, Arc, Mutex, RwLock}, time::Instant,
 };
 
 use crate::config::{Config, SyncMode};
@@ -276,6 +275,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         snapshot_set: &Mutex<TSS>,
         _snapshot_task: SnapshotTask,
     ) {
+        let start_time = Instant::now();
         // Snapshot procedure:
         // 1) Allocate the snapshot in a pending state.
         // 2) Atomically switch to a new WAL file with ordinal higher than the pending snapshot
@@ -317,9 +317,11 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         snapshot_set
             .publish_completed_snapshot(pending_snapshot.ordinal, true, true)
             .unwrap();
+
+        let elapsed = start_time.elapsed();
         println!(
-            "PersistentKeyValueStore: published snapshot with ID {}",
-            pending_snapshot.ordinal
+            "PersistentKeyValueStore: published snapshot with ID {}; duration: {:?}",
+            pending_snapshot.ordinal, elapsed
         );
     }
 

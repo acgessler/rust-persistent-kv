@@ -4,15 +4,19 @@
 //!  - full snapshots that are periodically written to disk
 //!  - write-ahead log (WAL) to capture recent additions
 
-mod store;
 mod config;
-mod snapshots;
 mod snapshot_set;
+mod snapshots;
+mod store;
 
-use std::{ borrow::{ Borrow, Cow }, error::Error, str };
+use std::{
+    borrow::{Borrow, Cow},
+    error::Error,
+    str,
+};
 
 use snapshot_set::FileSnapshotSet;
-use store::{ FixedLengthKey64Bit, VariableLengthKey, Store, StoreImpl };
+use store::{FixedLengthKey64Bit, Store, StoreImpl, VariableLengthKey};
 
 pub use config::Config;
 
@@ -37,7 +41,9 @@ pub trait SerializableKey {
 }
 
 impl<K, V> PersistentKeyValueStore<K, V>
-    where K: SerializableKey, V: SerializableValue + SerializableKey
+where
+    K: SerializableKey,
+    V: SerializableValue + SerializableKey,
 {
     pub fn new(path: &std::path::Path, config: Config) -> Result<Self, Box<dyn Error>> {
         let snapshot_set = FileSnapshotSet::new(path)?;
@@ -56,7 +62,10 @@ impl<K, V> PersistentKeyValueStore<K, V>
         let value = value.into().serialize().into_owned(); //  TODO: Serde
         match &self.store {
             StoreImpl::FixedKey(store) => {
-                store.set(FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()), value);
+                store.set(
+                    FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()),
+                    value,
+                );
             }
             StoreImpl::VariableKey(store) => {
                 store.set(VariableLengthKey(key.serialize().into_owned()), value);
@@ -64,17 +73,23 @@ impl<K, V> PersistentKeyValueStore<K, V>
         }
     }
 
-    pub fn get<Q>(&self, key: &Q) -> Option<V> where K: Borrow<Q>, Q: ?Sized + SerializableKey {
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + SerializableKey,
+    {
         let value = match &self.store {
-            StoreImpl::FixedKey(store) => {
-                store.get(key.serialize_fixed_size().unwrap().borrow())
-            }
-            StoreImpl::VariableKey(store) => { store.get(&key.serialize()) }
+            StoreImpl::FixedKey(store) => store.get(key.serialize_fixed_size().unwrap().borrow()),
+            StoreImpl::VariableKey(store) => store.get(&key.serialize()),
         };
         value.map(|value| V::from_bytes(&value))
     }
 
-    pub fn unset<Q>(&self, key: &Q) where K: Borrow<Q>, Q: ?Sized + SerializableKey {
+    pub fn unset<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + SerializableKey,
+    {
         match &self.store {
             StoreImpl::FixedKey(store) => {
                 store.unset(key.serialize_fixed_size().unwrap().borrow());
@@ -89,8 +104,8 @@ impl<K, V> PersistentKeyValueStore<K, V>
 impl<K, V> std::fmt::Debug for PersistentKeyValueStore<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (num_elements, num_bytes) = match &self.store {
-            StoreImpl::FixedKey(store) => { store.compute_size_info() }
-            StoreImpl::VariableKey(store) => { store.compute_size_info() }
+            StoreImpl::FixedKey(store) => store.compute_size_info(),
+            StoreImpl::VariableKey(store) => store.compute_size_info(),
         };
         write!(
             f,
@@ -137,7 +152,7 @@ macro_rules! implement_integer_key_type {
                 $integer_type::from_le_bytes(buf)
             }
         }
-        
+
         impl SerializableKey for $integer_type {
             const IS_FIXED_SIZE: bool = true;
             fn serialize(&self) -> Cow<'_, [u8]> {
@@ -145,7 +160,8 @@ macro_rules! implement_integer_key_type {
             }
             fn serialize_fixed_size(&self) -> Option<[u8; 8]> {
                 let mut buf = [0; 8];
-                buf[..std::mem::size_of::<$integer_type>()].copy_from_slice(&self.to_le_bytes()[..]);
+                buf[..std::mem::size_of::<$integer_type>()]
+                    .copy_from_slice(&self.to_le_bytes()[..]);
                 Some(buf)
             }
         }
@@ -163,18 +179,16 @@ implement_integer_key_type!(i8);
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
     use super::*;
+    use tempfile::TempDir;
     // This set of tests focuses on the interface with different key, value types,
     // tests for the actual persistence behaviour are in store.ts.
 
     #[test]
     fn setget_string_string() {
         let tmp_dir = TempDir::new().unwrap();
-        let store: PersistentKeyValueStore<String, String> = PersistentKeyValueStore::new(
-            tmp_dir.path(),
-            Config::default()
-        ).unwrap();
+        let store: PersistentKeyValueStore<String, String> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
         store.set("foo", "1");
         assert_eq!(store.get("foo"), Some("1".to_string()));
     }
@@ -182,10 +196,8 @@ mod tests {
     #[test]
     fn setget_u64_u64() {
         let tmp_dir = TempDir::new().unwrap();
-        let store: PersistentKeyValueStore<u64, u64> = PersistentKeyValueStore::new(
-            tmp_dir.path(),
-            Config::default()
-        ).unwrap();
+        let store: PersistentKeyValueStore<u64, u64> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
         store.set(35293853295u64, 1139131311u64);
         assert_eq!(store.get(&35293853295u64), Some(1139131311u64));
     }
@@ -193,10 +205,8 @@ mod tests {
     #[test]
     fn setget_i32_i32() {
         let tmp_dir = TempDir::new().unwrap();
-        let store: PersistentKeyValueStore<i32, i32> = PersistentKeyValueStore::new(
-            tmp_dir.path(),
-            Config::default()
-        ).unwrap();
+        let store: PersistentKeyValueStore<i32, i32> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
         store.set(352938539, 113913131);
         assert_eq!(store.get(&352938539), Some(113913131));
     }

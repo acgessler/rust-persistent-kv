@@ -20,6 +20,12 @@ pub enum SyncMode {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Config {
+
+    /// If true, we will not write any snapshot / restore events to stdout.
+    /// By default this is on as such events are rare and will be helpful to spot
+    /// unexpected config or runtime issues.
+    pub silent: bool,
+
     /// The interval at which full snapshots should be created. The unit counted is the
     /// number of key-value pairs modified (created, updated or deleted) meaning if
     /// `snapshot_interval` is 10,000, then a snapshot will be created every 10,000
@@ -52,8 +58,9 @@ impl Default for Config {
     fn default() -> Config {
         Self {
             snapshot_interval: 10000,
-            memory_bucket_count: 32,
+            memory_bucket_count: 128,
             sync_mode: SyncMode::NoExplicitSync,
+            silent: false,
         }
     }
 }

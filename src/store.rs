@@ -9,9 +9,12 @@ use std::{
     time::Instant,
 };
 
-use crate::{config::{Config, SyncMode}, snapshot_set::SnapshotOrdinal};
-use crate::snapshot_set::{FileSnapshotSet, SnapshotSet, SnapshotType};
 use crate::snapshot::{SnapshotReader, SnapshotWriter};
+use crate::snapshot_set::{FileSnapshotSet, SnapshotSet, SnapshotType};
+use crate::{
+    config::{Config, SyncMode},
+    snapshot_set::SnapshotOrdinal,
+};
 
 // Support switching between fixed (up to 8 bytes) and variable length keys.
 // The former is used for all integer types and avoids allocations on the write path.
@@ -104,7 +107,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             config,
             buckets: data,
             snapshot_set: Arc::new(Mutex::new(snapshot_set)),
-            wal: Mutex::new(snapshot_writer).into(),
+            wal: Arc::new(Mutex::new(snapshot_writer)),
             full_snapshot_writer_thread: None,
             full_snapshot_writer_sender: None,
             update_counter: AtomicU64::new(0),
@@ -228,14 +231,16 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 });
         }
         let elapsed = start_time.elapsed();
-        println!(
-            "PersistentKeyValueStore: restored from snapshots with IDs {:?}; duration: {:?}",
-            snapshots_to_restore
-                .iter()
-                .map(|e| e.ordinal)
-                .collect::<Vec<SnapshotOrdinal>>(),
-            elapsed
-        );
+        if !self.config.silent {
+            println!(
+                "PersistentKeyValueStore: restored from snapshots with IDs {:?}; duration: {:?}",
+                snapshots_to_restore
+                    .iter()
+                    .map(|e| e.ordinal)
+                    .collect::<Vec<SnapshotOrdinal>>(),
+                elapsed
+            );
+        }
         Ok(())
     }
 
@@ -246,6 +251,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         let snapshot_set = self.snapshot_set.clone();
         let wal_ref = self.wal.clone();
         let buckets_ref = self.buckets.clone();
+        let config_clone = self.config.clone();
         self.full_snapshot_writer_sender = Some(sender);
         self.full_snapshot_writer_thread = Some(std::thread::spawn(move || {
             loop {
@@ -259,6 +265,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                             snapshot_task = queued_snapshot_task;
                         }
                         Self::write_and_finalize_snapshot_(
+                            &config_clone,
                             &wal_ref,
                             &buckets_ref,
                             &snapshot_set,
@@ -299,6 +306,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     }
 
     fn write_and_finalize_snapshot_(
+        config: &Config,
         wal_ref: &Mutex<SnapshotWriter>,
         buckets: &Vec<Bucket<TKey>>,
         snapshot_set: &Mutex<TSS>,
@@ -335,7 +343,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                     .unwrap()
                     .shard_paths[0],
                 true,
-                wal_ref.sync_mode,
+                config.sync_mode,
             );
             pending_snapshot
         };
@@ -347,11 +355,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             .publish_completed_snapshot(pending_snapshot.ordinal, true, true)
             .unwrap();
 
-        let elapsed = start_time.elapsed();
-        println!(
-            "PersistentKeyValueStore: published snapshot with ID {}; duration: {:?}",
-            pending_snapshot.ordinal, elapsed
-        );
+        if !config.silent {
+            let elapsed = start_time.elapsed();
+            println!(
+                "PersistentKeyValueStore: published snapshot with ID {}; duration: {:?}",
+                pending_snapshot.ordinal, elapsed
+            );
+        }
     }
 
     fn write_buckets_to_snapshot_(path: &Path, buckets: &Vec<Bucket<TKey>>) {

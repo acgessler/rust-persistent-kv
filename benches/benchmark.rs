@@ -12,9 +12,13 @@ where
     KeyType: persistent_kv::SerializableKey + 'static,
     F: Sync + Send + Copy + 'static + Fn(u64) -> KeyType,
 {
+    let config = persistent_kv::Config {
+        silent: true,
+        ..Default::default()
+    };
     let tmp_dir = TempDir::new().unwrap();
     let store: Arc<PersistentKeyValueStore<KeyType, String>> =
-        Arc::new(PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap());
+        Arc::new(PersistentKeyValueStore::new(tmp_dir.path(), config).unwrap());
 
     let mut join_handles = Vec::new();
     for _ in 0..threads {

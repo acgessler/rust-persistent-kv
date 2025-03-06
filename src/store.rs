@@ -11,7 +11,7 @@ use std::{
 
 use crate::{config::{Config, SyncMode}, snapshot_set::SnapshotOrdinal};
 use crate::snapshot_set::{FileSnapshotSet, SnapshotSet, SnapshotType};
-use crate::snapshots::{SnapshotReader, SnapshotWriter};
+use crate::snapshot::{SnapshotReader, SnapshotWriter};
 
 // Support switching between fixed (up to 8 bytes) and variable length keys.
 // The former is used for all integer types and avoids allocations on the write path.

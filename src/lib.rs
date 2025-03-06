@@ -6,7 +6,7 @@
 
 mod config;
 mod snapshot_set;
-mod snapshots;
+mod snapshot;
 mod store;
 
 use std::{

@@ -348,7 +348,16 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             pending_snapshot
         };
 
-        Self::write_buckets_to_snapshot_(&pending_snapshot.shard_paths[0], buckets);
+        if let Err(err) =
+            Self::write_buckets_to_snapshot_(&pending_snapshot.shard_paths[0], buckets)
+        {
+            if !config.silent {
+                println!(
+                    "PersistentKeyValueStore: abandoning snapshot {}; error: {:?}",
+                    pending_snapshot.ordinal, err,
+                );
+            }
+        }
 
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
         snapshot_set
@@ -364,7 +373,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         }
     }
 
-    fn write_buckets_to_snapshot_(path: &Path, buckets: &Vec<Bucket<TKey>>) {
+    fn write_buckets_to_snapshot_(
+        path: &Path,
+        buckets: &Vec<Bucket<TKey>>,
+    ) -> Result<(), Box<dyn Error>> {
         // No fsyncs required when writing individual snapshot entries. The implementation
         // of SnapshotWriter.drop includes a fsync covering all writes to the snapshot.
         let mut writer = SnapshotWriter::new(path, false, SyncMode::NoExplicitSync);
@@ -381,14 +393,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             );
 
             for (key_range, value_range) in ranges.iter() {
-                writer
-                    .append_entry(
-                        &raw_data[key_range.clone()],
-                        Some(&raw_data[value_range.clone()]),
-                    )
-                    .expect("Failed to write full snapshot entry to disk");
+                writer.append_entry(
+                    &raw_data[key_range.clone()],
+                    Some(&raw_data[value_range.clone()]),
+                )?;
             }
         }
+        Ok(())
     }
 
     fn fast_copy_bucket_to_ranges_(

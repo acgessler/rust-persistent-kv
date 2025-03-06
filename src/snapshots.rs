@@ -19,7 +19,7 @@ pub struct SnapshotEntry {
 
 pub struct SnapshotWriter {
     file: Arc<File>,
-    sync_mode: SyncMode,
+    pub sync_mode: SyncMode,
 }
 
 pub struct SnapshotAppendOp {

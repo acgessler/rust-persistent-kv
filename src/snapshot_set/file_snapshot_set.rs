@@ -1,4 +1,3 @@
-use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -6,123 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Classifications of different snapshot files (used in conjunction with SnapshotSet)
-#[derive(PartialEq, Clone, Debug, Copy)]
-pub enum SnapshotType {
-    /// A differential snapshot containing set and unset operations in sequence.
-    /// Used for write-ahead-log snapshot files.
-    Diff,
-    /// A full snapshot containing all key-value pairs at a given point in time,
-    /// assessed as complete and up-to-date i.e. the latest snapshot of this type.
-    FullCompleted,
-    /// A snapshot that did not complete successfully, e.g. due to a power failure
-    /// or process panic. This snapshot is incomplete and should not be used.
-    Pending,
-}
+use regex::Regex;
 
-/// Ordinal number type used for sequencing snapshots. Snapshots with higher ordinal numbers must
-/// be applied after snapshots with lower ordinal numbers. Shards of the same snapshot can be
-/// applied in parallel.
-#[derive(PartialEq, PartialOrd, Eq, Ord, Hash, Clone, Debug, Copy)]
-pub struct SnapshotOrdinal(pub u64);
-
-impl std::fmt::Display for SnapshotOrdinal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Information about a snapshot. Always matches the state on disk, i.e. if a snapshot has
-/// a SnapshotInfo instance the corresponding files also exist, though they may be empty.
-#[derive(Clone, PartialEq, Debug)]
-pub struct SnapshotInfo {
-    pub snapshot_type: SnapshotType,
-    pub ordinal: SnapshotOrdinal,
-    // Paths to the different shards that make up the snapshot. Shards are guaranteed
-    // to contain distinct keys and can thus be read in parallel.
-    //
-    // Shards are usually placed in numbered files containing the index and shard count.
-    // However, once a snapshot is parsed, this information should no longer be used
-    // and shard_paths is the canonical source of the ordering and number of shards.
-    // This ensures we support recovery from broken state.
-    pub shard_paths: Vec<PathBuf>,
-}
-
-impl SnapshotInfo {
-    #[cfg(test)]
-    pub fn single_shard_path(&self) -> PathBuf {
-        assert!(
-            self.shard_paths.len() == 1,
-            "This snapshotInfo should have exactly one path"
-        );
-        self.shard_paths[0].clone()
-    }
-}
-
-/// A set of snapshot files, used to manage and query snapshots in a given folder.
-/// Provides operations to query snapshots that exist with their types and to add
-/// new snapshot file (names) to the set.
-///
-/// This type only manages file names and creates/removes files as a whole, it does
-/// not actually read/write snapshots _contents_.
-///
-/// Snapshot files are named in the format `snapshot_<ordinal>_<type>.bin` where
-/// `<ordinal>` is a monotonically increasing number and `<type>` is one of
-/// `diff`, `full`, or `pending` where `pending` should be renamed to `full`
-/// once the snapshot is complete and published.
-///
-/// <ordinal> is used to determine the order of snapshots independent of file
-/// system modification times which could be tampered with.
-///
-/// TODO(acgessler): Add file based lock to prevent accidental construction of
-/// multiple SnapshotSet instances for the same folder.
-pub trait SnapshotSet: Send {
-    /// Registers a new snapshot path usable for the given snapshot type.
-    /// This will return a new snapshot path that can be used to write the snapshot to.
-    ///
-    /// If `may_append_existing` is set to true, an existing snapshot file may be returned
-    /// if there is no (completed) full snapshot with a higher ordinal.
-    ///
-    /// A new snapshot file will have a ordinal higher than all previous snapshots.
-    /// A new shapshot file will be created with empty contents.
-    fn create_or_get_snapshot(
-        &mut self,
-        snapshot_type: SnapshotType,
-        shard_count: u64,
-        may_append_existing: bool,
-    ) -> Result<SnapshotInfo, io::Error>;
-
-    /// Publishes a pending snapshot as a full snapshot. This will rename the snapshot file
-    /// to indicate that it is a full snapshot and considered complete.
-    /// `purge_obsolete_diff_snapshots` specifies if differential snapshots that
-    /// are now obsolete should be auto-deleted.
-    /// `purge_obsolete_pending_snapshots` specifies if pending snapshots that
-    /// precede the now completed snapshot should be auto-deleted.
-    fn publish_completed_snapshot(
-        &mut self,
-        pending_snapshot_ordinal: SnapshotOrdinal,
-        purge_obsolete_diff_snapshots: bool,
-        purge_obsolete_pending_snapshots: bool,
-    ) -> Result<(), io::Error>;
-
-    /// Returns all snapshots that need to be restored in order to get the latest state.
-    /// This includes the latest full snapshot and all differential snapshots since then.
-    fn get_snapshots_to_restore(&self) -> Vec<&SnapshotInfo>;
-}
-
-/// Admin operations for a snapshot set, e.g. pruning snapshots.
-#[allow(dead_code)]
-pub trait SnapshotSetAdmin: Send {
-    /// Prunes backup snapshots, keeping only the latest `max_backups_keep` full snapshots.
-    /// This is useful to limit the number of backup snapshots that are kept around.
-    /// __Warning__: This will delete files from the file system.
-    fn prune_backup_snapshots(&mut self, max_backups_keep: usize) -> Result<(), std::io::Error>;
-
-    /// Prunes snapshots that are not completed, e.g. due to a power failure or process panic.
-    /// This is useful to clean up incomplete snapshots that should not be used.
-    /// __Warning__: This will delete files from the file system.
-    fn prune_not_completed_snapshots(&mut self) -> Result<(), std::io::Error>;
-}
+use super::{SnapshotInfo, SnapshotOrdinal, SnapshotSet, SnapshotType};
 
 /// Implementation of SnapshotSet using files on disk that exactly mirror the state
 /// in memory, i.e., each entry in `snapshots` corresponds to a file in the folder, even
@@ -131,165 +16,6 @@ pub trait SnapshotSetAdmin: Send {
 pub struct FileSnapshotSet {
     pub snapshots: Vec<SnapshotInfo>,
     folder: PathBuf,
-}
-
-impl SnapshotSet for FileSnapshotSet {
-    fn create_or_get_snapshot(
-        &mut self,
-        snapshot_type: SnapshotType,
-        shard_count: u64,
-        may_append_existing: bool,
-    ) -> Result<SnapshotInfo, io::Error> {
-        assert!(shard_count > 0);
-        assert!(
-            snapshot_type != SnapshotType::FullCompleted,
-            "Cannot create completed snapshot directly, use publish_completed_snapshot()"
-        );
-        if may_append_existing {
-            let latest_diff_snapshot = self
-                .snapshots
-                .iter()
-                .filter(|snapshot| snapshot.snapshot_type == snapshot_type)
-                .max_by_key(|snapshot| snapshot.ordinal);
-            let latest_full_snapshot = self.get_latest_full_snapshot();
-            // We cannot continue writing the existing files if the shard count changed,
-            // this happens if the binary is restarted with different configuration.
-            if let Some(latest_diff_snapshot) = latest_diff_snapshot {
-                if latest_diff_snapshot.shard_paths.len() as u64 == shard_count {
-                    if let Some(latest_full_snapshot) = latest_full_snapshot {
-                        if latest_full_snapshot.ordinal < latest_diff_snapshot.ordinal {
-                            return Ok(latest_diff_snapshot.clone());
-                        }
-                    } else {
-                        return Ok(latest_diff_snapshot.clone());
-                    }
-                }
-            }
-        }
-        // Should (and could) return &SnapshotInfo, but borrow checker doesn't follow the branches.
-        self.create_new_snapshot_file_(snapshot_type, shard_count)
-            .cloned()
-    }
-
-    fn publish_completed_snapshot(
-        &mut self,
-        pending_snapshot_ordinal: SnapshotOrdinal,
-        purge_obsolete_diff_snapshots: bool,
-        purge_obsolete_pending_snapshots: bool,
-    ) -> Result<(), io::Error> {
-        let pending_snapshot = self
-            .snapshots
-            .iter_mut()
-            .find(|snapshot| snapshot.ordinal == pending_snapshot_ordinal)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Snapshot not found"))?;
-        if pending_snapshot.snapshot_type != SnapshotType::Pending {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "Snapshot is not pending",
-            ));
-        }
-        let shard_count = pending_snapshot.shard_paths.len() as u64;
-        for shard in 0..shard_count {
-            let new_snapshot_path = Self::generate_snapshot_filename_(
-                pending_snapshot.ordinal,
-                shard,
-                shard_count,
-                SnapshotType::FullCompleted,
-            );
-            let new_snapshot_path = self.folder.join(new_snapshot_path);
-            fs::rename(
-                &pending_snapshot.shard_paths[shard as usize],
-                &new_snapshot_path,
-            )?;
-            pending_snapshot.shard_paths[shard as usize] = new_snapshot_path;
-        }
-        pending_snapshot.snapshot_type = SnapshotType::FullCompleted;
-
-        if purge_obsolete_diff_snapshots || purge_obsolete_pending_snapshots {
-            let obsolete_snapshot: Vec<_> = self
-                .snapshots
-                .iter()
-                .filter(|snapshot| {
-                    ((purge_obsolete_diff_snapshots
-                        && snapshot.snapshot_type == SnapshotType::Diff)
-                        || (purge_obsolete_pending_snapshots
-                            && snapshot.snapshot_type == SnapshotType::Pending))
-                        && snapshot.ordinal < pending_snapshot_ordinal
-                })
-                .cloned()
-                .collect();
-            for obsolete_snapshot in obsolete_snapshot {
-                for path in obsolete_snapshot.shard_paths.iter() {
-                    fs::remove_file(&path)?;
-                }
-                self.snapshots
-                    .retain(|s| s.ordinal != obsolete_snapshot.ordinal);
-            }
-        }
-        Ok(())
-    }
-
-    fn get_snapshots_to_restore(&self) -> Vec<&SnapshotInfo> {
-        let mut snapshots_to_restore = Vec::new();
-        let last_snapshot_ordinal = match self.get_latest_full_snapshot() {
-            Some(snapshot) => {
-                snapshots_to_restore.push(snapshot);
-                snapshot.ordinal
-            }
-            None => SnapshotOrdinal(0),
-        };
-        snapshots_to_restore.append(&mut self.get_all_diff_snapshots_since(last_snapshot_ordinal));
-        snapshots_to_restore
-    }
-}
-
-impl SnapshotSetAdmin for FileSnapshotSet {
-    fn prune_backup_snapshots(&mut self, max_backups_keep: usize) -> Result<(), std::io::Error> {
-        let mut full_backup_snapshots = self
-            .snapshots
-            .iter()
-            .filter(|snapshot| snapshot.snapshot_type == SnapshotType::FullCompleted)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        full_backup_snapshots.sort_by_key(|snapshot| snapshot.ordinal);
-        // Skip last item, this is the latest snapshot which we never consider a backup.
-        let full_backup_snapshots = &full_backup_snapshots[..full_backup_snapshots.len() - 1];
-        if max_backups_keep >= full_backup_snapshots.len() {
-            return Ok(());
-        }
-
-        let num_snapshots_to_delete = full_backup_snapshots.len() - max_backups_keep;
-        for snapshot in full_backup_snapshots.iter().take(num_snapshots_to_delete) {
-            println!("Pruning backup snapshot: {:?}", snapshot.shard_paths);
-            for path in snapshot.shard_paths.iter() {
-                fs::remove_file(path)?
-            }
-            self.snapshots.retain(|s| s.ordinal != snapshot.ordinal);
-        }
-        Ok(())
-    }
-
-    fn prune_not_completed_snapshots(&mut self) -> Result<(), std::io::Error> {
-        let not_completed_snapshots = self
-            .snapshots
-            .iter()
-            .filter(|snapshot| snapshot.snapshot_type == SnapshotType::Pending)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for snapshot in not_completed_snapshots.iter() {
-            println!(
-                "Pruning not completed snapshots: {:?}",
-                snapshot.shard_paths
-            );
-            for path in snapshot.shard_paths.iter() {
-                fs::remove_file(path)?
-            }
-            self.snapshots.retain(|s| s.ordinal != snapshot.ordinal);
-        }
-        Ok(())
-    }
 }
 
 impl FileSnapshotSet {
@@ -439,6 +165,116 @@ impl FileSnapshotSet {
             }
         };
         Some((ordinal, shard, shard_count, snapshot_type))
+    }
+}
+
+impl SnapshotSet for FileSnapshotSet {
+    fn create_or_get_snapshot(
+        &mut self,
+        snapshot_type: SnapshotType,
+        shard_count: u64,
+        may_append_existing: bool,
+    ) -> Result<SnapshotInfo, io::Error> {
+        assert!(shard_count > 0);
+        assert!(
+            snapshot_type != SnapshotType::FullCompleted,
+            "Cannot create completed snapshot directly, use publish_completed_snapshot()"
+        );
+        if may_append_existing {
+            let latest_diff_snapshot = self
+                .snapshots
+                .iter()
+                .filter(|snapshot| snapshot.snapshot_type == snapshot_type)
+                .max_by_key(|snapshot| snapshot.ordinal);
+            let latest_full_snapshot = self.get_latest_full_snapshot();
+            // We cannot continue writing the existing files if the shard count changed,
+            // this happens if the binary is restarted with different configuration.
+            if let Some(latest_diff_snapshot) = latest_diff_snapshot {
+                if latest_diff_snapshot.shard_paths.len() as u64 == shard_count {
+                    if let Some(latest_full_snapshot) = latest_full_snapshot {
+                        if latest_full_snapshot.ordinal < latest_diff_snapshot.ordinal {
+                            return Ok(latest_diff_snapshot.clone());
+                        }
+                    } else {
+                        return Ok(latest_diff_snapshot.clone());
+                    }
+                }
+            }
+        }
+        // Should (and could) return &SnapshotInfo, but borrow checker doesn't follow the branches.
+        self.create_new_snapshot_file_(snapshot_type, shard_count)
+            .cloned()
+    }
+
+    fn publish_completed_snapshot(
+        &mut self,
+        pending_snapshot_ordinal: SnapshotOrdinal,
+        purge_obsolete_diff_snapshots: bool,
+        purge_obsolete_pending_snapshots: bool,
+    ) -> Result<(), io::Error> {
+        let pending_snapshot = self
+            .snapshots
+            .iter_mut()
+            .find(|snapshot| snapshot.ordinal == pending_snapshot_ordinal)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Snapshot not found"))?;
+        if pending_snapshot.snapshot_type != SnapshotType::Pending {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Snapshot is not pending",
+            ));
+        }
+        let shard_count = pending_snapshot.shard_paths.len() as u64;
+        for shard in 0..shard_count {
+            let new_snapshot_path = Self::generate_snapshot_filename_(
+                pending_snapshot.ordinal,
+                shard,
+                shard_count,
+                SnapshotType::FullCompleted,
+            );
+            let new_snapshot_path = self.folder.join(new_snapshot_path);
+            fs::rename(
+                &pending_snapshot.shard_paths[shard as usize],
+                &new_snapshot_path,
+            )?;
+            pending_snapshot.shard_paths[shard as usize] = new_snapshot_path;
+        }
+        pending_snapshot.snapshot_type = SnapshotType::FullCompleted;
+
+        if purge_obsolete_diff_snapshots || purge_obsolete_pending_snapshots {
+            let obsolete_snapshot: Vec<_> = self
+                .snapshots
+                .iter()
+                .filter(|snapshot| {
+                    ((purge_obsolete_diff_snapshots
+                        && snapshot.snapshot_type == SnapshotType::Diff)
+                        || (purge_obsolete_pending_snapshots
+                            && snapshot.snapshot_type == SnapshotType::Pending))
+                        && snapshot.ordinal < pending_snapshot_ordinal
+                })
+                .cloned()
+                .collect();
+            for obsolete_snapshot in obsolete_snapshot {
+                for path in obsolete_snapshot.shard_paths.iter() {
+                    fs::remove_file(&path)?;
+                }
+                self.snapshots
+                    .retain(|s| s.ordinal != obsolete_snapshot.ordinal);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_snapshots_to_restore(&self) -> Vec<&SnapshotInfo> {
+        let mut snapshots_to_restore = Vec::new();
+        let last_snapshot_ordinal = match self.get_latest_full_snapshot() {
+            Some(snapshot) => {
+                snapshots_to_restore.push(snapshot);
+                snapshot.ordinal
+            }
+            None => SnapshotOrdinal(0),
+        };
+        snapshots_to_restore.append(&mut self.get_all_diff_snapshots_since(last_snapshot_ordinal));
+        snapshots_to_restore
     }
 }
 
@@ -840,59 +676,5 @@ mod tests {
         assert_eq!(snapshots_to_restore[0].ordinal, SnapshotOrdinal(2));
         assert_eq!(snapshots_to_restore[1].ordinal, SnapshotOrdinal(3));
         assert_eq!(snapshots_to_restore[2].ordinal, SnapshotOrdinal(5));
-    }
-
-    #[test]
-    fn prunes_backup_snapshots() {
-        let tmp_dir = create_temp_dir();
-        create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-1_full.bin"); // Backup
-        create_snapshot_file(tmp_dir.path(), "snapshot_2_0-of-1_full.bin"); // Backup
-        create_snapshot_file(tmp_dir.path(), "snapshot_3_0-of-1_diff.bin");
-        create_snapshot_file(tmp_dir.path(), "snapshot_4_0-of-1_full.bin"); // Backup
-        create_snapshot_file(tmp_dir.path(), "snapshot_5_0-of-1_full.bin"); // Latest
-
-        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
-        assert_eq!(snapshot_set.snapshots.len(), 5);
-
-        snapshot_set.prune_backup_snapshots(3).unwrap();
-
-        assert_eq!(snapshot_set.snapshots.len(), 5);
-
-        snapshot_set.prune_backup_snapshots(1).unwrap();
-
-        assert_eq!(snapshot_set.snapshots.len(), 3);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
-        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
-        assert_eq!(snapshot_set.snapshots[2].ordinal, SnapshotOrdinal(5));
-
-        // Construct a new SnapShotSet to verify that the files were actually deleted.
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
-        snapshot_set.prune_backup_snapshots(0).unwrap();
-
-        assert_eq!(snapshot_set.snapshots.len(), 2);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
-        assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(5));
-    }
-
-    #[test]
-    fn prunes_not_completed_snapshots() {
-        let tmp_dir = create_temp_dir();
-        create_snapshot_file(tmp_dir.path(), "snapshot_3_0-of-1_pending.bin");
-        create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-1_pending.bin"); // Not completed
-        create_snapshot_file(tmp_dir.path(), "snapshot_2_0-of-1_full.bin"); // Not completed
-
-        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
-        assert_eq!(snapshot_set.snapshots.len(), 3);
-
-        snapshot_set.prune_not_completed_snapshots().unwrap();
-
-        assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
-
-        // Construct a new SnapShotSet to verify that the files were actually deleted.
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
-
-        assert_eq!(snapshot_set.snapshots.len(), 1);
-        assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
     }
 }

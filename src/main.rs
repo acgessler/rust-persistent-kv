@@ -5,7 +5,7 @@ use clap::{ App, Arg, SubCommand };
 #[allow(dead_code)]
 mod snapshot_set;
 
-use crate::snapshot_set::SnapshotSetAdmin;
+use crate::snapshot_set::admin::SnapshotSetAdmin;
 
 fn main() {
     let matches = App::new("SnapshotAdmin")

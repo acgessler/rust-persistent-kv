@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     error::Error,
     hash::{DefaultHasher, Hash, Hasher},
+    io,
     ops::Range,
     path::Path,
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
@@ -78,7 +79,9 @@ struct SnapshotTask;
 pub struct Store<TKey: KeyAdapter, TSS: SnapshotSet + 'static> {
     config: Config,
     buckets: Vec<Bucket<TKey>>, // TODO: cache
-    wal: Arc<Mutex<SnapshotWriter>>,
+    // Outer mutex held only to replace the list of writers. Inner mutex held to guard
+    // write operations against a range of keys.
+    wal: Arc<RwLock<Vec<Mutex<SnapshotWriter>>>>,
     snapshot_set: Arc<Mutex<TSS>>,
     update_counter: AtomicU64,
     full_snapshot_writer_thread: Option<std::thread::JoinHandle<()>>,
@@ -103,13 +106,12 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         }
 
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
-        let wal_path = &snapshot_set.create_or_get_snapshot(SnapshotType::Diff, 1, true)?;
-        let snapshot_writer = SnapshotWriter::new(&wal_path.shard_paths[0], true, config.sync_mode);
+        let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config)?;
         let mut self_ = Self {
             config,
             buckets: data,
             snapshot_set: Arc::new(Mutex::new(snapshot_set)),
-            wal: Arc::new(Mutex::new(snapshot_writer)),
+            wal: Arc::new(RwLock::new(snapshot_writers)),
             full_snapshot_writer_thread: None,
             full_snapshot_writer_sender: None,
             update_counter: AtomicU64::new(0),
@@ -139,12 +141,15 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     }
 
     pub fn set(&self, key: TKey, value: Vec<u8>) -> &Store<TKey, TSS> {
-        let bucket = Self::get_bucket_(&self.buckets, key.borrow());
+        let (bucket, hash) = Self::get_bucket_(&self.buckets, key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistent w.r.t. the in-memory map.
         // _append_op allows postponing writes/commit actions that do not need the lock.
         let _append_op = {
-            let mut wal = self.wal.lock().unwrap();
+            let wal_outer = self.wal.read().unwrap();
+            let mut wal = wal_outer[(hash % wal_outer.len() as u64) as usize]
+                .lock()
+                .unwrap();
             let append_op = wal
                 .append_entry(key.borrow(), Some(&value))
                 .expect("Failed to write set op to write-ahead log");
@@ -162,11 +167,14 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     }
 
     pub fn unset(&self, key: &[u8]) -> &Store<TKey, TSS> {
-        let bucket = Self::get_bucket_(&self.buckets, key);
+        let (bucket, hash) = Self::get_bucket_(&self.buckets, key);
 
         // See notes on lock usage in set()
         let _append_op = {
-            let mut wal = self.wal.lock().unwrap();
+            let wal_outer = self.wal.read().unwrap();
+            let mut wal = wal_outer[(hash % wal_outer.len() as u64) as usize]
+                .lock()
+                .unwrap();
             let append_op = wal
                 .append_entry(key, None)
                 .expect("Failed to write unset op to write-ahead log");
@@ -195,7 +203,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     where
         F: FnOnce(Option<&[u8]>) -> V,
     {
-        let bucket = Self::get_bucket_(&self.buckets, key);
+        let (bucket, _hash) = Self::get_bucket_(&self.buckets, key);
         f(bucket.data.read().unwrap().get(key).map(|v| v.as_slice()))
     }
 
@@ -206,16 +214,36 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         self
     }
 
-    fn get_bucket_<'t>(buckets: &'t Vec<Bucket<TKey>>, key: &[u8]) -> &'t Bucket<TKey> {
+    fn get_bucket_<'t>(buckets: &'t Vec<Bucket<TKey>>, key: &[u8]) -> (&'t Bucket<TKey>, u64) {
         let hash = Self::hash_(key);
         let index = hash % (buckets.len() as u64);
-        &buckets[index as usize]
+        (&buckets[index as usize], hash)
     }
 
     fn hash_(key: &[u8]) -> u64 {
         let mut hasher = DefaultHasher::new(); // TODO(acgessler) re-use?
         key.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn create_write_ahead_log_(
+        snapshot_set: &mut TSS,
+        config: &Config,
+    ) -> Result<Vec<Mutex<SnapshotWriter>>, io::Error> {
+        let wal_path = &snapshot_set.create_or_get_snapshot(
+            SnapshotType::Diff,
+            config.target_io_parallelism_writelog,
+            true,
+        )?;
+        Ok((0..wal_path.shard_paths.len())
+            .map(|i| {
+                Mutex::new(SnapshotWriter::new(
+                    &wal_path.shard_paths[i],
+                    true,
+                    config.sync_mode,
+                ))
+            })
+            .collect())
     }
 
     fn restore_from_snapshots_(&mut self) -> Result<(), Box<dyn Error>> {
@@ -231,13 +259,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let shard_paths = snapshot_path.shard_paths.clone();
             let buckets = &self.buckets;
             thread::scope(|s|-> Result<(), String> {
-                for chunk in shard_paths.chunks(snapshot_path.shard_paths.len().div_ceil(self.config.target_io_parallelism as usize)) {
+                for chunk in shard_paths.chunks(snapshot_path.shard_paths.len().div_ceil(self.config.target_io_parallelism_snapshots as usize)) {
                     s.spawn(move || -> Result<(), String> {
                         for shard in chunk {
                             SnapshotReader::new(&shard)
                                 .read_entries(|entry| {
                                     let key: TKey = entry.key.to_owned().into();
-                                    let bucket = Self::get_bucket_(buckets, key.borrow());
+                                    let bucket = Self::get_bucket_(buckets, key.borrow()).0;
                                     let mut data = bucket.data.write().unwrap();
 
                                     if entry.value.is_empty() {
@@ -331,7 +359,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
 
     fn write_and_finalize_snapshot_(
         config: &Config,
-        wal_ref: &Mutex<SnapshotWriter>,
+        wal_ref: &RwLock<Vec<Mutex<SnapshotWriter>>>,
         buckets: &Vec<Bucket<TKey>>,
         snapshot_set: &Mutex<TSS>,
         _snapshot_task: SnapshotTask,
@@ -358,19 +386,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
 
         let pending_snapshot = {
             // Disallow concurrent writes to the store for this section only so
-            // we can atomically switch to a new WAL file.
-            let mut wal_ref = wal_ref.lock().unwrap();
+            // we can atomically switch to a new WAL file (set of files if sharded)
+            // TODO: handle error propagation.
+            let mut wal_outer = wal_ref.write().unwrap();
             let pending_snapshot = snapshot_set
                 .create_or_get_snapshot(SnapshotType::Pending, shard_count as u64, false)
                 .unwrap();
-            *wal_ref = SnapshotWriter::new(
-                &snapshot_set
-                    .create_or_get_snapshot(SnapshotType::Diff, 1, false)
-                    .unwrap()
-                    .shard_paths[0],
-                true,
-                config.sync_mode,
-            );
+            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, &config).unwrap();
             pending_snapshot
         };
 
@@ -380,7 +402,8 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let pending_snapshot = &pending_snapshot;
             let buckets = &buckets;
 
-            for chunk in shards.chunks(shard_count.div_ceil(config.target_io_parallelism as usize))
+            for chunk in
+                shards.chunks(shard_count.div_ceil(config.target_io_parallelism_snapshots as usize))
             {
                 s.spawn(move || -> Result<(), String> {
                     for shard in chunk {
@@ -485,7 +508,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         if shard_count == 1 && size_bytes < MIN_SIZE_FOR_PARALLEL_IO {
             1
         } else {
-            max(shard_count, config.target_io_parallelism as usize)
+            max(shard_count, config.target_io_parallelism_snapshots as usize)
         }
     }
 }

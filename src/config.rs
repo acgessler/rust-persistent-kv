@@ -54,7 +54,10 @@ pub struct Config {
 
     /// The number of threads to use for IO operations. This includes reading and writing
     /// of snapshots and influences (but not fully determines) number of shards used.
-    pub target_io_parallelism: u64,
+    pub target_io_parallelism_snapshots: u64,
+
+    // The number of shards to use for the write log (this is directly the file count used)
+    pub target_io_parallelism_writelog: u64,
 
     // The targeted size for a snapshot shard. This is not a hard limit. This number influences
     // (but not fully determines) number of shards used for snapshots.
@@ -65,10 +68,11 @@ impl Default for Config {
     fn default() -> Config {
         Self {
             snapshot_interval: 10000,
-            memory_bucket_count: 128,
+            memory_bucket_count: 32,
             sync_mode: SyncMode::NoExplicitSync,
             silent: false,
-            target_io_parallelism: 1,
+            target_io_parallelism_snapshots: 8,
+            target_io_parallelism_writelog: 1,
             target_snapshot_shard_size_bytes: 1024 * 1024 * 1024, // 1 GB
         }
     }

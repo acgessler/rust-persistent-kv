@@ -80,7 +80,7 @@ fn snapshot_and_restore_heavy_rw_load(
     value: String,
 ) {
     let config = persistent_kv::Config {
-        snapshot_interval: 25000,
+        snapshot_interval: n / 2 - n / 6,
         ..Default::default()
     };
 
@@ -180,11 +180,11 @@ fn writes_threaded(c: &mut Criterion) {
 
 fn reads_threaded(c: &mut Criterion) {
     c.bench_function(
-        "25000 random key reads from a universe of 1000 keys from 8 threads with string keys",
+        "25000 random key reads from a universe of 100 keys from 8 threads with string keys",
         |b| {
             b.iter(|| {
                 random_key_reads(
-                    black_box(1000),
+                    black_box(100),
                     black_box(25000),
                     black_box(8),
                     |i| i.to_string(),
@@ -194,11 +194,11 @@ fn reads_threaded(c: &mut Criterion) {
         },
     );
     c.bench_function(
-        "25000 random key reads from a universe of 1000 keys from 8 threads with int keys",
+        "25000 random key reads from a universe of 100 keys from 8 threads with int keys",
         |b| {
             b.iter(|| {
                 random_key_reads(
-                    black_box(1000),
+                    black_box(100),
                     black_box(25000),
                     black_box(8),
                     |i| i,
@@ -208,11 +208,11 @@ fn reads_threaded(c: &mut Criterion) {
         },
     );
     c.bench_function(
-        "25000 random key reads from a universe of 1000 keys from 8 threads with very long string keys",
+        "25000 random key reads from a universe of 100 keys from 8 threads with very long string keys",
         |b| {
             b.iter(|| {
                 random_key_reads(
-                    black_box(1000),
+                    black_box(100),
                     black_box(25000),
                     black_box(8),
                     |i| i.to_string() + &"a".repeat(10000),
@@ -230,10 +230,10 @@ fn loadtest_snapshot_and_restore(c: &mut Criterion) {
             b.iter(|| {
                 snapshot_and_restore_heavy_rw_load(
                     black_box(3),
-                    black_box(25000),
+                    black_box(10000),
                     black_box(100),
                     black_box(8),
-                    value_string_with_length(32),
+                    value_string_with_length(10),
                 )
             })
         },

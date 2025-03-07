@@ -5,8 +5,8 @@
 //!  - write-ahead log (WAL) to capture recent additions
 
 mod config;
-mod snapshot_set;
 mod snapshot;
+mod snapshot_set;
 mod store;
 
 use std::{
@@ -78,11 +78,13 @@ where
         K: Borrow<Q>,
         Q: ?Sized + SerializableKey,
     {
-        let value = match &self.store {
-            StoreImpl::FixedKey(store) => store.get(key.serialize_fixed_size().unwrap().borrow()),
-            StoreImpl::VariableKey(store) => store.get(&key.serialize()),
-        };
-        value.map(|value| V::from_bytes(&value))
+        let c = |bytes: Option<&[u8]>| bytes.map(|bytes| V::from_bytes(bytes));
+        match &self.store {
+            StoreImpl::VariableKey(store) => store.get_convert(&key.serialize(), c),
+            StoreImpl::FixedKey(store) => {
+                store.get_convert(key.serialize_fixed_size().unwrap().borrow(), c)
+            }
+        }
     }
 
     pub fn unset<Q>(&self, key: &Q)

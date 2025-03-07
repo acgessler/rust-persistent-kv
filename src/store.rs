@@ -181,10 +181,20 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        // TODO(acgessler) avoid Vec copy
+        self.get_convert(key, |v| v.map(|v| v.to_vec()))
+    }
+
+    /// Avoids copying the value to a new Vec and apssed it to a FnOnce for processing
+    /// instead. Internal locks are held for the duration of f() and f()'s implementation
+    /// may not block or call back into the store.
+    pub fn get_convert<F, V>(&self, key: &[u8], f: F) -> V
+    where
+        F: FnOnce(Option<&[u8]>) -> V,
+    {
         let bucket = self.get_bucket_(key);
-        bucket.data.read().unwrap().get(key).cloned()
+        f(bucket.data.read().unwrap().get(key).map(|v| v.as_slice()))
     }
 
     #[cfg(test)]

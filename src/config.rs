@@ -20,7 +20,6 @@ pub enum SyncMode {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Config {
-
     /// If true, we will not write any snapshot / restore events to stdout.
     /// By default this is on as such events are rare and will be helpful to spot
     /// unexpected config or runtime issues.
@@ -52,6 +51,14 @@ pub struct Config {
 
     /// File system synchronization model.
     pub sync_mode: SyncMode,
+
+    /// The number of threads to use for IO operations. This includes reading and writing
+    /// of snapshots and influences (but not fully determines) number of shards used.
+    pub target_io_parallelism: u64,
+
+    // The targeted size for a snapshot shard. This is not a hard limit. This number influences
+    // (but not fully determines) number of shards used for snapshots.
+    pub target_snapshot_shard_size_bytes: usize,
 }
 
 impl Default for Config {
@@ -61,6 +68,8 @@ impl Default for Config {
             memory_bucket_count: 128,
             sync_mode: SyncMode::NoExplicitSync,
             silent: false,
+            target_io_parallelism: 1,
+            target_snapshot_shard_size_bytes: 1024 * 1024 * 1024, // 1 GB
         }
     }
 }

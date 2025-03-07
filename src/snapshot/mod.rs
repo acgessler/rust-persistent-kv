@@ -6,7 +6,6 @@ use prost::Message;
 pub use reader::SnapshotReader;
 pub use writer::SnapshotWriter;
 
-
 #[derive(Clone, PartialEq, Message)]
 pub struct SnapshotEntry {
     #[prost(bytes, tag = "1")]
@@ -14,7 +13,6 @@ pub struct SnapshotEntry {
     #[prost(bytes, tag = "2")]
     pub value: Vec<u8>,
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -16,7 +16,6 @@ pub trait SnapshotSetAdmin: Send {
     fn prune_not_completed_snapshots(&mut self) -> Result<(), std::io::Error>;
 }
 
-
 impl SnapshotSetAdmin for FileSnapshotSet {
     fn prune_backup_snapshots(&mut self, max_backups_keep: usize) -> Result<(), std::io::Error> {
         let mut full_backup_snapshots = self
@@ -68,11 +67,14 @@ impl SnapshotSetAdmin for FileSnapshotSet {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, path::{Path, PathBuf}};
+    use std::{
+        fs::File,
+        path::{Path, PathBuf},
+    };
     use tempfile::TempDir;
 
-    use crate::snapshot_set::SnapshotOrdinal;
     use super::*;
+    use crate::snapshot_set::SnapshotOrdinal;
 
     fn create_temp_dir() -> TempDir {
         TempDir::new().unwrap()

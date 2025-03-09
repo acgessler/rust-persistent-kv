@@ -19,7 +19,8 @@ pub struct FileSnapshotSet {
 }
 
 impl FileSnapshotSet {
-    pub fn new(folder: &Path) -> Result<Self, &str> {
+    pub fn new(folder: &Path) -> Result<Self, io::Error> {
+        fs::create_dir_all(folder)?;
         // Scan the folder for all files matching snapshot pattern and map them to SnapshotInfo.
         let mut snapshots: Vec<SnapshotInfo> = Vec::new();
         let mut seen_shards: HashSet<(SnapshotOrdinal, u64)> = HashSet::new();
@@ -36,12 +37,18 @@ impl FileSnapshotSet {
                     .find(|snapshot| snapshot.ordinal == ordinal);
                 if let Some(snapshot) = snapshot {
                     if seen_shards.contains(&(ordinal, shard)) {
-                        return Err("Duplicate snapshot shard detected");
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Duplicate snapshot shard detected",
+                        ));
                     }
                     let (prior_shard_count, prior_snapshot_type) =
                         info_by_ordinal.get(&ordinal).unwrap();
                     if shard_count != *prior_shard_count || snapshot_type != *prior_snapshot_type {
-                        return Err("Inconsistent snapshot shard count or type detected");
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Inconsistent snapshot shard count or type detected",
+                        ));
                     }
                     snapshot.shard_paths.push(path);
                 } else {
@@ -60,7 +67,10 @@ impl FileSnapshotSet {
         for snapshot in snapshots.iter() {
             let (shard_count, _) = info_by_ordinal.get(&snapshot.ordinal).unwrap();
             if snapshot.shard_paths.len() as u64 != *shard_count {
-                return Err("Missing snapshot shard detected");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Missing snapshot shard detected",
+                ));
             }
         }
 
@@ -303,6 +313,14 @@ mod tests {
     }
 
     #[test]
+    fn empty_folder_does_not_exist_yet() {
+        let tmp_dir = create_temp_dir();
+
+        let snapshot_set = FileSnapshotSet::new(&tmp_dir.path().join("new-folder")).unwrap();
+        assert_eq!(snapshot_set.snapshots.len(), 0);
+    }
+
+    #[test]
     fn snapshots_in_ordinal_order() {
         let tmp_dir = create_temp_dir();
         create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-1_diff.bin");
@@ -378,7 +396,7 @@ mod tests {
         create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-1_full.bin");
 
         let error = FileSnapshotSet::new(tmp_dir.path()).unwrap_err();
-        assert_eq!(error, "Duplicate snapshot shard detected");
+        assert_eq!(error.to_string(), "Duplicate snapshot shard detected");
     }
 
     #[test]
@@ -387,7 +405,7 @@ mod tests {
         create_snapshot_file(tmp_dir.path(), "snapshot_1_1-of-2_diff.bin");
 
         let error = FileSnapshotSet::new(tmp_dir.path()).unwrap_err();
-        assert_eq!(error, "Missing snapshot shard detected");
+        assert_eq!(error.to_string(), "Missing snapshot shard detected");
     }
 
     #[test]
@@ -397,7 +415,10 @@ mod tests {
         create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-1_full.bin");
 
         let error = FileSnapshotSet::new(tmp_dir.path()).unwrap_err();
-        assert_eq!(error, "Inconsistent snapshot shard count or type detected");
+        assert_eq!(
+            error.to_string(),
+            "Inconsistent snapshot shard count or type detected"
+        );
     }
 
     #[test]
@@ -407,7 +428,10 @@ mod tests {
         create_snapshot_file(tmp_dir.path(), "snapshot_1_0-of-2_diff.bin");
 
         let error = FileSnapshotSet::new(tmp_dir.path()).unwrap_err();
-        assert_eq!(error, "Inconsistent snapshot shard count or type detected");
+        assert_eq!(
+            error.to_string(),
+            "Inconsistent snapshot shard count or type detected"
+        );
     }
 
     #[test]

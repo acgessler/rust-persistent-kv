@@ -38,6 +38,14 @@ mod tests {
             SnapshotWriterConfig {
                 sync_mode: SyncMode::NoExplicitSync,
                 use_positioned_writes: true,
+            },
+            SnapshotWriterConfig {
+                sync_mode: SyncMode::Buffered,
+                use_positioned_writes: false,
+            },
+            SnapshotWriterConfig {
+                sync_mode: SyncMode::Buffered,
+                use_positioned_writes: true,
             }
         ]
     }

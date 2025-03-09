@@ -1,10 +1,10 @@
 use std::{
     cell::RefCell,
     fs::{ File, OpenOptions },
-    io::Write,
+    io::{ BufWriter, Seek, Write },
     marker::PhantomData,
     path::Path,
-    sync::{ atomic::{ AtomicU64, Ordering }, Arc, MutexGuard },
+    sync::{ atomic::{ AtomicU64, Ordering }, Arc, Mutex, MutexGuard },
 };
 
 #[cfg(target_os = "windows")]
@@ -24,65 +24,8 @@ pub struct SnapshotWriterConfig {
 
 pub struct SnapshotWriter {
     pub config: SnapshotWriterConfig,
-    file: Arc<File>,
+    file: WriterImpl,
     next_offset: AtomicU64,
-}
-
-/// Returned by operations in `SnapshotWriter` and represents a sequenced
-/// but not yet commited write operation. The operation can be commited
-/// concurrently with other write operations on the same file, but the
-/// commit() call must occur before any other sequence_entry() call on
-/// the same thread (and Send is disallowed).
-pub struct SequencedAppendOp {
-    file: Arc<File>,
-    should_sync: bool,
-    should_write_at_offset: Option<(u64, usize)>,
-    _is_not_send: PhantomData<MutexGuard<'static, ()>>,
-}
-
-impl SequencedAppendOp {
-    pub fn commit(&mut self) -> std::io::Result<()> {
-        if self.should_write_at_offset.is_some() {
-            self.write_at_offset()?;
-        }
-        if self.should_sync {
-            self.fsync();
-        }
-        Ok(())
-    }
-
-    fn should_commit(&self) -> bool {
-        self.should_sync || self.should_write_at_offset.is_some()
-    }
-
-    fn fsync(&mut self) {
-        self.should_sync = false;
-        self.file.sync_data().unwrap();
-    }
-
-    fn write_at_offset(&mut self) -> std::io::Result<()> {
-        let (offset, length) = self.should_write_at_offset.unwrap();
-        self.should_write_at_offset = None;
-        SnapshotWriter::BUFFER.with(|buffer| {
-            let mut bytes_written = 0;
-            while bytes_written < length {
-                let bytes = self.file.seek_write(
-                    &buffer.borrow_mut()[bytes_written..length],
-                    offset + (bytes_written as u64)
-                )?;
-                bytes_written += bytes;
-            }
-            Ok(())
-        })
-    }
-}
-
-impl Drop for SequencedAppendOp {
-    fn drop(&mut self) {
-        if self.should_commit() {
-            panic!("SequencedAppendOp was dropped without calling execute()");
-        }
-    }
 }
 
 impl SnapshotWriter {
@@ -91,33 +34,43 @@ impl SnapshotWriter {
         static ENTRY: RefCell<SnapshotEntry> = RefCell::new(SnapshotEntry::default());
     }
 
+    /// Constructs a writer in the given path. If `append` is true, the writer will append to the
+    /// file if it exists, otherwise it will immediately truncate the file.
     pub fn new(path: &Path, append: bool, config: SnapshotWriterConfig) -> Self {
-        let file = Arc::new(
-            OpenOptions::new()
-                .write(true)
-                .append(if config.use_positioned_writes { false } else { append })
-                .create(true)
-                .open(path)
-                .unwrap()
-        );
-        Self {
-            file: file.clone(),
-            config: config.clone(),
-            next_offset: AtomicU64::new(
-                if config.use_positioned_writes {
-                    if append {
-                        path.metadata().unwrap().len()
-                    } else {
-                        file.set_len(0).unwrap();
-                        0
-                    }
+        // Work around write_at issues on Linux by not using append when using positioned writes.
+        let file = OpenOptions::new()
+            .write(true)
+            .append(if config.use_positioned_writes { false } else { append })
+            .create(true)
+            .open(path)
+            .unwrap();
+        let next_offset = AtomicU64::new(
+            if config.use_positioned_writes {
+                if append {
+                    path.metadata().unwrap().len()
                 } else {
+                    file.set_len(0).unwrap(); // Explicitly truncate()
                     0
                 }
-            ),
+            } else {
+                0
+            }
+        );
+
+        Self {
+            file: if config.sync_mode == SyncMode::Buffered {
+                WriterImpl::Buffered(Arc::new(Mutex::new(BufWriter::new(file))))
+            } else {
+                WriterImpl::Unbuffered(Arc::new(file))
+            },
+            config: config.clone(),
+            next_offset,
         }
     }
 
+    /// Invariant: each call to sequence_entry() must be matched by a call to commit() on the
+    /// returned `SequencedAppendOp` before the next call to sequence_entry() on the same thread.
+    /// This pattern must be followed regardless of configuration.
     pub fn sequence_entry(
         &mut self,
         key: &[u8],
@@ -144,7 +97,10 @@ impl SnapshotWriter {
                         buffer.len(),
                     ))
                 } else {
-                    self.file.write_all(&buffer)?;
+                    match self.file {
+                        WriterImpl::Buffered(ref file) => file.lock().unwrap().write_all(&buffer)?,
+                        WriterImpl::Unbuffered(ref mut file) => file.write_all(&buffer)?,
+                    }
                     None
                 };
 
@@ -161,7 +117,101 @@ impl SnapshotWriter {
 
 impl Drop for SnapshotWriter {
     fn drop(&mut self) {
-        self.file.sync_all().unwrap();
+        // Closing a file or flushing a buffer does not sync to disk, forcing
+        // a sync is a desirable property of our store as it ensures that a
+        // second store instance constructed after dropping the first will
+        // read all data.
+        self.file.fsync().unwrap();
+    }
+}
+
+#[derive(Clone, Debug)]
+enum WriterImpl {
+    Buffered(Arc<Mutex<BufWriter<File>>>),
+    Unbuffered(Arc<File>),
+}
+
+impl WriterImpl {
+    fn fsync(&mut self) -> std::io::Result<()> {
+        match self {
+            WriterImpl::Buffered(file) => {
+                let mut file = file.lock().unwrap();
+                file.flush()?;
+                file.get_ref().sync_data()
+            }
+            WriterImpl::Unbuffered(file) => file.sync_data(),
+        }
+    }
+
+    fn seek_write_all(&self, buffer: &[u8], offset: u64) -> std::io::Result<()> {
+        match self {
+            WriterImpl::Buffered(file) => {
+                let mut file = file.lock().unwrap();
+                file.get_mut().seek(std::io::SeekFrom::Start(offset))?;
+                file.write_all(buffer)
+            }
+            WriterImpl::Unbuffered(file) => {
+                let mut bytes_written = 0;
+                let length = buffer.len();
+                while bytes_written < length {
+                    let bytes = file.seek_write(
+                        &buffer[bytes_written..length],
+                        offset + (bytes_written as u64)
+                    )?;
+                    bytes_written += bytes;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Returned by operations in `SnapshotWriter` and represents a sequenced
+/// but not yet commited write operation. The operation can be commited
+/// concurrently with other write operations on the same file, but the
+/// commit() call must occur before any other sequence_entry() call on
+/// the same thread (and Send is disallowed).
+pub struct SequencedAppendOp {
+    file: WriterImpl,
+    should_sync: bool,
+    should_write_at_offset: Option<(u64, usize)>,
+    _is_not_send: PhantomData<MutexGuard<'static, ()>>,
+}
+
+impl SequencedAppendOp {
+    pub fn commit(&mut self) -> std::io::Result<()> {
+        if self.should_write_at_offset.is_some() {
+            self.write_at_offset()?;
+        }
+        if self.should_sync {
+            self.fsync()?;
+        }
+        Ok(())
+    }
+
+    fn should_commit(&self) -> bool {
+        self.should_sync || self.should_write_at_offset.is_some()
+    }
+
+    fn fsync(&mut self) -> std::io::Result<()> {
+        self.should_sync = false;
+        self.file.fsync()
+    }
+
+    fn write_at_offset(&mut self) -> std::io::Result<()> {
+        let (offset, length) = self.should_write_at_offset.unwrap();
+        self.should_write_at_offset = None;
+        SnapshotWriter::BUFFER.with(|buffer| {
+            self.file.seek_write_all(&buffer.borrow_mut()[..length], offset)
+        })
+    }
+}
+
+impl Drop for SequencedAppendOp {
+    fn drop(&mut self) {
+        if self.should_commit() {
+            panic!("SequencedAppendOp was dropped without calling execute()");
+        }
     }
 }
 

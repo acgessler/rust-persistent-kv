@@ -474,7 +474,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         // No fsyncs required when writing individual snapshot entries. The implementation
         // of SnapshotWriter.drop includes a fsync covering all writes to the snapshot.
         let mut writer = SnapshotWriter::new(path, false, SnapshotWriterConfig {
-            sync_mode: SyncMode::NoExplicitSync,
+            sync_mode: SyncMode::Buffered,
             use_positioned_writes: false,
         });
 
@@ -653,7 +653,6 @@ mod tests {
         //  (Ord=2, Full) is the current up to date snapshot.
         //  (Ord=3, Diff) is the new write-ahead log, which is empty.
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
-        println!("{:?}", snapshot_set);
         assert_eq!(snapshot_set.snapshots.len(), 2);
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
         assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);

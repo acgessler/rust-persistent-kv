@@ -13,9 +13,14 @@ pub enum SyncMode {
     /// Note: even in this mode, calling set() or unset() on a key still
     /// blocks on the write() syscall to append to the write log. This means that
     /// local process failures should not lead to data loss. OS level failures
-    /// or power events are likely to lead to data loss if there were any
-    /// writes in the seconds prior to the failure.
+    /// or power events are likely to lead to data loss concerning writes that occured
+    /// in the seconds prior to the failure.
     NoExplicitSync,
+
+    /// Allows for in-memory buffering of writes before writing to disk. There
+    /// is no limit on the size of frequency of the buffer, so at worst a disk
+    /// write may not occur until the store instance is dropped.
+    Buffered,
 }
 
 #[derive(Clone, PartialEq, Debug)]

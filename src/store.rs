@@ -214,7 +214,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         self
     }
 
-    fn get_bucket_<'t>(buckets: &'t Vec<Bucket<TKey>>, key: &[u8]) -> (&'t Bucket<TKey>, u64) {
+    fn get_bucket_<'t>(buckets: &'t [Bucket<TKey>], key: &[u8]) -> (&'t Bucket<TKey>, u64) {
         let hash = Self::hash_(key);
         let index = hash % (buckets.len() as u64);
         (&buckets[index as usize], hash)
@@ -262,7 +262,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 for chunk in shard_paths.chunks(snapshot_path.shard_paths.len().div_ceil(self.config.target_io_parallelism_snapshots as usize)) {
                     s.spawn(move || -> Result<(), String> {
                         for shard in chunk {
-                            SnapshotReader::new(&shard)
+                            SnapshotReader::new(shard)
                                 .read_entries(|entry| {
                                     let key: TKey = entry.key.to_owned().into();
                                     let bucket = Self::get_bucket_(buckets, key.borrow()).0;
@@ -392,7 +392,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let pending_snapshot = snapshot_set
                 .create_or_get_snapshot(SnapshotType::Pending, shard_count as u64, false)
                 .unwrap();
-            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, &config).unwrap();
+            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, config).unwrap();
             pending_snapshot
         };
 
@@ -407,10 +407,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             {
                 s.spawn(move || -> Result<(), String> {
                     for shard in chunk {
-                        let bucket_range = (shard * buckets_per_shard) as usize
-                            ..min(buckets.len(), ((shard + 1) * buckets_per_shard) as usize);
+                        let bucket_range = shard * buckets_per_shard
+                            ..min(buckets.len(), (shard + 1) * buckets_per_shard);
                         Self::write_buckets_to_snapshot_(
-                            &pending_snapshot.shard_paths[*shard as usize],
+                            &pending_snapshot.shard_paths[*shard],
                             &buckets[bucket_range],
                         )
                         .map_err(|e| e.to_string())?;
@@ -488,7 +488,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         }
     }
 
-    fn recommend_shard_count_(buckets: &Vec<Bucket<TKey>>, config: &Config) -> usize {
+    fn recommend_shard_count_(buckets: &[Bucket<TKey>], config: &Config) -> usize {
         // Estimate the number of shards required to keep the snapshot size below the
         // target size. This is a rough estimate of serialized size.
         let size_bytes: usize = buckets

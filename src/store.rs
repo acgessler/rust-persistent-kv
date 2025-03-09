@@ -108,7 +108,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         }
 
         // Construct instance, imbuing it with a write-ahead log to persist new entries.
-        let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config)?;
+        let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config, true)?;
         let mut self_ = Self {
             config,
             buckets: data,
@@ -240,12 +240,13 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
 
     fn create_write_ahead_log_(
         snapshot_set: &mut TSS,
-        config: &Config
+        config: &Config,
+        may_append_existing: bool
     ) -> Result<Vec<Mutex<SnapshotWriter>>, io::Error> {
         let wal_path = &snapshot_set.create_or_get_snapshot(
             SnapshotType::Diff,
             config.target_io_parallelism_writelog,
-            true
+            may_append_existing
         )?;
         Ok(
             (0..wal_path.shard_paths.len())
@@ -417,7 +418,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let pending_snapshot = snapshot_set
                 .create_or_get_snapshot(SnapshotType::Pending, shard_count as u64, false)
                 .unwrap();
-            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, config).unwrap();
+            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, config, false).unwrap();
             pending_snapshot
         };
 
@@ -489,10 +490,12 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             );
 
             for (key_range, value_range) in ranges.iter() {
-                writer.sequence_entry(
-                    &raw_data[key_range.clone()],
-                    Some(&raw_data[value_range.clone()])
-                )?.commit()?;
+                writer
+                    .sequence_entry(
+                        &raw_data[key_range.clone()],
+                        Some(&raw_data[value_range.clone()])
+                    )?
+                    .commit()?;
             }
         }
         Ok(())
@@ -650,6 +653,7 @@ mod tests {
         //  (Ord=2, Full) is the current up to date snapshot.
         //  (Ord=3, Diff) is the new write-ahead log, which is empty.
         let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        println!("{:?}", snapshot_set);
         assert_eq!(snapshot_set.snapshots.len(), 2);
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
         assert_eq!(snapshot_set.snapshots[0].snapshot_type, SnapshotType::FullCompleted);

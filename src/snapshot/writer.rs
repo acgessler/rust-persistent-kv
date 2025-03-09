@@ -29,8 +29,10 @@ pub struct SnapshotWriter {
 }
 
 /// Returned by operations in `SnapshotWriter` and represents a sequenced
-/// but not yet commited write operation. The operation that can be commited
-/// concurrently with other write operations on the same file.
+/// but not yet commited write operation. The operation can be commited
+/// concurrently with other write operations on the same file, but the
+/// commit() call must occur before any other sequence_entry() call on
+/// the same thread (and Send is disallowed).
 pub struct SequencedAppendOp {
     file: Arc<File>,
     should_sync: bool,

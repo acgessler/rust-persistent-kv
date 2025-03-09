@@ -492,7 +492,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 writer.sequence_entry(
                     &raw_data[key_range.clone()],
                     Some(&raw_data[value_range.clone()])
-                )?;
+                )?.commit()?;
             }
         }
         Ok(())

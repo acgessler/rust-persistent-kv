@@ -125,6 +125,8 @@ impl Drop for SnapshotWriter {
     }
 }
 
+/// Internal abstraction to handle unsynced writes to a file and synced writes
+/// to a buffered file, depending on configuration.
 #[derive(Clone, Debug)]
 enum WriterImpl {
     Buffered(Arc<Mutex<BufWriter<File>>>),

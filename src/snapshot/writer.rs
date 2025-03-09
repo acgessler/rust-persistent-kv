@@ -1,10 +1,13 @@
 use std::{
     cell::RefCell,
-    fs::{ File, OpenOptions },
-    io::{ BufWriter, Seek, Write },
+    fs::{File, OpenOptions},
+    io::{BufWriter, Seek, Write},
     marker::PhantomData,
     path::Path,
-    sync::{ atomic::{ AtomicU64, Ordering }, Arc, Mutex, MutexGuard },
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 #[cfg(target_os = "windows")]
@@ -40,22 +43,24 @@ impl SnapshotWriter {
         // Work around write_at issues on Linux by not using append when using positioned writes.
         let file = OpenOptions::new()
             .write(true)
-            .append(if config.use_positioned_writes { false } else { append })
+            .append(if config.use_positioned_writes {
+                false
+            } else {
+                append
+            })
             .create(true)
             .open(path)
             .unwrap();
-        let next_offset = AtomicU64::new(
-            if config.use_positioned_writes {
-                if append {
-                    path.metadata().unwrap().len()
-                } else {
-                    file.set_len(0).unwrap(); // Explicitly truncate()
-                    0
-                }
+        let next_offset = AtomicU64::new(if config.use_positioned_writes {
+            if append {
+                path.metadata().unwrap().len()
             } else {
+                file.set_len(0).unwrap(); // Explicitly truncate()
                 0
             }
-        );
+        } else {
+            0
+        });
 
         Self {
             file: if config.sync_mode == SyncMode::Buffered {
@@ -74,7 +79,7 @@ impl SnapshotWriter {
     pub fn sequence_entry(
         &mut self,
         key: &[u8],
-        value: Option<&[u8]>
+        value: Option<&[u8]>,
     ) -> Result<SequencedAppendOp, Box<dyn std::error::Error>> {
         // Reuse entry and byte buffer memory to avoid unnecessary allocations
         Self::ENTRY.with(|entry| {
@@ -93,12 +98,15 @@ impl SnapshotWriter {
 
                 let should_write_at_offset = if self.config.use_positioned_writes {
                     Some((
-                        self.next_offset.fetch_add(buffer.len() as u64, Ordering::SeqCst),
+                        self.next_offset
+                            .fetch_add(buffer.len() as u64, Ordering::SeqCst),
                         buffer.len(),
                     ))
                 } else {
                     match self.file {
-                        WriterImpl::Buffered(ref file) => file.lock().unwrap().write_all(&buffer)?,
+                        WriterImpl::Buffered(ref file) => {
+                            file.lock().unwrap().write_all(&buffer)?
+                        }
                         WriterImpl::Unbuffered(ref mut file) => file.write_all(&buffer)?,
                     }
                     None
@@ -122,49 +130,6 @@ impl Drop for SnapshotWriter {
         // second store instance constructed after dropping the first will
         // read all data.
         self.file.fsync().unwrap();
-    }
-}
-
-/// Internal abstraction to handle unsynced writes to a file and synced writes
-/// to a buffered file, depending on configuration.
-#[derive(Clone, Debug)]
-enum WriterImpl {
-    Buffered(Arc<Mutex<BufWriter<File>>>),
-    Unbuffered(Arc<File>),
-}
-
-impl WriterImpl {
-    fn fsync(&mut self) -> std::io::Result<()> {
-        match self {
-            WriterImpl::Buffered(file) => {
-                let mut file = file.lock().unwrap();
-                file.flush()?;
-                file.get_ref().sync_data()
-            }
-            WriterImpl::Unbuffered(file) => file.sync_data(),
-        }
-    }
-
-    fn seek_write_all(&self, buffer: &[u8], offset: u64) -> std::io::Result<()> {
-        match self {
-            WriterImpl::Buffered(file) => {
-                let mut file = file.lock().unwrap();
-                file.get_mut().seek(std::io::SeekFrom::Start(offset))?;
-                file.write_all(buffer)
-            }
-            WriterImpl::Unbuffered(file) => {
-                let mut bytes_written = 0;
-                let length = buffer.len();
-                while bytes_written < length {
-                    let bytes = file.seek_write(
-                        &buffer[bytes_written..length],
-                        offset + (bytes_written as u64)
-                    )?;
-                    bytes_written += bytes;
-                }
-                Ok(())
-            }
-        }
     }
 }
 
@@ -204,7 +169,8 @@ impl SequencedAppendOp {
         let (offset, length) = self.should_write_at_offset.unwrap();
         self.should_write_at_offset = None;
         SnapshotWriter::BUFFER.with(|buffer| {
-            self.file.seek_write_all(&buffer.borrow_mut()[..length], offset)
+            self.file
+                .seek_write_all(&buffer.borrow_mut()[..length], offset)
         })
     }
 }
@@ -213,6 +179,49 @@ impl Drop for SequencedAppendOp {
     fn drop(&mut self) {
         if self.should_commit() {
             panic!("SequencedAppendOp was dropped without calling execute()");
+        }
+    }
+}
+
+/// Internal abstraction to handle unsynced writes to a file and synced writes
+/// to a buffered file, depending on configuration.
+#[derive(Clone, Debug)]
+enum WriterImpl {
+    Buffered(Arc<Mutex<BufWriter<File>>>),
+    Unbuffered(Arc<File>),
+}
+
+impl WriterImpl {
+    fn fsync(&mut self) -> std::io::Result<()> {
+        match self {
+            WriterImpl::Buffered(file) => {
+                let mut file = file.lock().unwrap();
+                file.flush()?;
+                file.get_ref().sync_data()
+            }
+            WriterImpl::Unbuffered(file) => file.sync_data(),
+        }
+    }
+
+    fn seek_write_all(&self, buffer: &[u8], offset: u64) -> std::io::Result<()> {
+        match self {
+            WriterImpl::Buffered(file) => {
+                let mut file = file.lock().unwrap();
+                file.get_mut().seek(std::io::SeekFrom::Start(offset))?;
+                file.write_all(buffer)
+            }
+            WriterImpl::Unbuffered(file) => {
+                let mut bytes_written = 0;
+                let length = buffer.len();
+                while bytes_written < length {
+                    let bytes = file.seek_write(
+                        &buffer[bytes_written..length],
+                        offset + (bytes_written as u64),
+                    )?;
+                    bytes_written += bytes;
+                }
+                Ok(())
+            }
         }
     }
 }

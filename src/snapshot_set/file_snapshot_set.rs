@@ -255,7 +255,7 @@ impl SnapshotSet for FileSnapshotSet {
                 .collect();
             for obsolete_snapshot in obsolete_snapshot {
                 for path in obsolete_snapshot.shard_paths.iter() {
-                    fs::remove_file(&path)?;
+                    fs::remove_file(path)?;
                 }
                 self.snapshots
                     .retain(|s| s.ordinal != obsolete_snapshot.ordinal);

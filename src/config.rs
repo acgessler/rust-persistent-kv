@@ -13,9 +13,14 @@ pub enum SyncMode {
     /// Note: even in this mode, calling set() or unset() on a key still
     /// blocks on the write() syscall to append to the write log. This means that
     /// local process failures should not lead to data loss. OS level failures
-    /// or power events are likely to lead to data loss if there were any
-    /// writes in the seconds prior to the failure.
+    /// or power events are likely to lead to data loss concerning writes that occured
+    /// in the seconds prior to the failure.
     NoExplicitSync,
+
+    /// Allows for in-memory buffering of writes before writing to disk. There
+    /// is no limit on the size of frequency of the buffer, so at worst a disk
+    /// write may not occur until the store instance is dropped.
+    Buffered,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -56,12 +61,16 @@ pub struct Config {
     /// of snapshots and influences (but not fully determines) number of shards used.
     pub target_io_parallelism_snapshots: u64,
 
-    // The number of shards to use for the write log (this is directly the file count used)
+    /// The number of shards to use for the write log (this is directly the file count used)
     pub target_io_parallelism_writelog: u64,
 
-    // The targeted size for a snapshot shard. This is not a hard limit. This number influences
-    // (but not fully determines) number of shards used for snapshots.
+    /// The targeted size for a snapshot shard. This is not a hard limit. This number influences
+    /// (but not fully determines) number of shards used for snapshots.
     pub target_snapshot_shard_size_bytes: usize,
+
+    /// Whether to make use of positioned writes e.g. write_at() instead of seek() + write().
+    /// This uses OS specific extensions and enables higher effective concurrency for writes.
+    pub use_positioned_writes: bool,
 }
 
 impl Default for Config {
@@ -74,6 +83,7 @@ impl Default for Config {
             target_io_parallelism_snapshots: 8,
             target_io_parallelism_writelog: 1,
             target_snapshot_shard_size_bytes: 1024 * 1024 * 1024, // 1 GB
+            use_positioned_writes: true,
         }
     }
 }

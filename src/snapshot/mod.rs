@@ -4,7 +4,7 @@ mod writer;
 use prost::Message;
 
 pub use reader::SnapshotReader;
-pub use writer::{ SnapshotWriter, SnapshotWriterConfig };
+pub use writer::{SnapshotWriter, SnapshotWriterConfig};
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SnapshotEntry {
@@ -16,7 +16,7 @@ pub struct SnapshotEntry {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ config::SyncMode, snapshot::writer::SnapshotWriterConfig };
+    use crate::{config::SyncMode, snapshot::writer::SnapshotWriterConfig};
 
     use super::*;
     use tempfile::NamedTempFile;
@@ -46,7 +46,7 @@ mod tests {
             SnapshotWriterConfig {
                 sync_mode: SyncMode::Buffered,
                 use_positioned_writes: true,
-            }
+            },
         ]
     }
 
@@ -55,9 +55,21 @@ mod tests {
         for config in write_configs() {
             let tmp_file = NamedTempFile::new().unwrap();
             let mut writer = SnapshotWriter::new(tmp_file.path(), false, config);
-            writer.sequence_entry(b"foo", Some(b"1")).unwrap().commit().unwrap();
-            writer.sequence_entry(b"bar", None).unwrap().commit().unwrap();
-            writer.sequence_entry(b"baz", Some(b"2")).unwrap().commit().unwrap();
+            writer
+                .sequence_entry(b"foo", Some(b"1"))
+                .unwrap()
+                .commit()
+                .unwrap();
+            writer
+                .sequence_entry(b"bar", None)
+                .unwrap()
+                .commit()
+                .unwrap();
+            writer
+                .sequence_entry(b"baz", Some(b"2"))
+                .unwrap()
+                .commit()
+                .unwrap();
             drop(writer);
 
             let mut reader = SnapshotReader::new(tmp_file.path());
@@ -78,8 +90,16 @@ mod tests {
             let tmp_file = NamedTempFile::new().unwrap();
             let mut writer = SnapshotWriter::new(tmp_file.path(), false, config);
             let very_large_data = b"1".repeat(1000000);
-            writer.sequence_entry(b"foo", Some(&very_large_data)).unwrap().commit().unwrap();
-            writer.sequence_entry(b"bar", Some(&very_large_data)).unwrap().commit().unwrap();
+            writer
+                .sequence_entry(b"foo", Some(&very_large_data))
+                .unwrap()
+                .commit()
+                .unwrap();
+            writer
+                .sequence_entry(b"bar", Some(&very_large_data))
+                .unwrap()
+                .commit()
+                .unwrap();
             drop(writer);
 
             let mut reader = SnapshotReader::new(tmp_file.path());

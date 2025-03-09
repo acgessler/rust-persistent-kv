@@ -1,4 +1,8 @@
-use std::{ fs::{ File, OpenOptions }, io::{ BufReader, Read }, path::Path };
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufReader, Read},
+    path::Path,
+};
 
 use prost::Message;
 
@@ -16,7 +20,8 @@ impl SnapshotReader {
     }
 
     pub fn read_entries<F>(&mut self, mut callback: F) -> Result<(), Box<dyn std::error::Error>>
-        where F: FnMut(&SnapshotEntry)
+    where
+        F: FnMut(&SnapshotEntry),
     {
         // TODO(acgessler): Deal with broken/partly written entries.
         const BUFFER_CAPACITY: usize = 1 << 16;
@@ -39,9 +44,8 @@ impl SnapshotReader {
             let mut prefix_buf = &buf[..bytes_already_read];
             let message_length = prost::encoding::decode_varint(&mut prefix_buf)? as usize;
             // SAFETY: prefix_buf was advanced from the start of buf, so the offset is valid.
-            let bytes_consumed_by_length_delim = (unsafe {
-                prefix_buf.as_ptr().offset_from(buf[..].as_ptr())
-            }) as usize;
+            let bytes_consumed_by_length_delim =
+                (unsafe { prefix_buf.as_ptr().offset_from(buf[..].as_ptr()) }) as usize;
 
             // Keep reading until we have the full message in buf. For very small messages
             // we have to backtrack, as the delimiter read may have read too much.
@@ -53,19 +57,15 @@ impl SnapshotReader {
                     .read_to_end(&mut buf)?;
             } else if message_length + bytes_consumed_by_length_delim < bytes_already_read {
                 reader.seek_relative(
-                    (message_length as i64) +
-                        (bytes_consumed_by_length_delim as i64) -
-                        (bytes_already_read as i64)
+                    (message_length as i64) + (bytes_consumed_by_length_delim as i64)
+                        - (bytes_already_read as i64),
                 )?;
             }
 
             entry.clear();
             entry.merge(
-                &buf
-                    [
-                        bytes_consumed_by_length_delim..bytes_consumed_by_length_delim +
-                            (message_length as usize)
-                    ]
+                &buf[bytes_consumed_by_length_delim
+                    ..bytes_consumed_by_length_delim + (message_length as usize)],
             )?;
             callback(&entry);
         }
@@ -73,7 +73,7 @@ impl SnapshotReader {
     }
     #[cfg(test)]
     pub fn read_entries_to_vec(
-        &mut self
+        &mut self,
     ) -> Result<Vec<SnapshotEntry>, Box<dyn std::error::Error>> {
         let mut entries = Vec::new();
         self.read_entries(|entry| entries.push(entry.clone()))?;

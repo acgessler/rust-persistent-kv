@@ -81,7 +81,7 @@ struct SnapshotTask;
 pub struct Store<TKey: KeyAdapter, TSS: SnapshotSet + 'static> {
     config: Config,
     buckets: Vec<Bucket<TKey>>, // TODO: cache
-    // Outer mutex held only to replace the list of writers. Inner mutex held to guard
+    // Outer mutex held only to replace the list of writers. Inner mutex held to sequence
     // write operations against a range of keys.
     wal: Arc<RwLock<Vec<Mutex<SnapshotWriter>>>>,
     snapshot_set: Arc<Mutex<TSS>>,
@@ -106,8 +106,6 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 data: RwLock::new(HashMap::new()).into(),
             });
         }
-
-        // Construct instance, imbuing it with a write-ahead log to persist new entries.
         let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config, true)?;
         let mut self_ = Self {
             config,
@@ -118,11 +116,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             full_snapshot_writer_sender: None,
             update_counter: AtomicU64::new(0),
         };
-
-        // Restore state from past snapshots. This will read the last full snapshot,
-        // if available, and then replay all write-ahead log entries since that snapshot.
         self_.restore_from_snapshots_()?;
-
         self_.start_snapshot_writer_thread_();
         Ok(self_)
     }

@@ -3,6 +3,7 @@ use std::{
     cmp::{max, min},
     collections::HashMap,
     error::Error,
+    fmt::Debug,
     hash::{DefaultHasher, Hash, Hasher},
     io,
     ops::Range,
@@ -23,14 +24,14 @@ use crate::{
 // The former is used for all integer types and avoids allocations on the write path.
 // On the read path, we always avoid allocations by borrowing as &u8 and leveraging
 // HashMap's native support for looking up borrowed keys.
-#[derive(Clone, PartialEq, Hash, Eq, Default)]
+#[derive(Clone, PartialEq, Hash, Eq, Default, Debug)]
 pub struct FixedLengthKey64Bit(pub [u8; 8]);
 
-#[derive(Clone, PartialEq, Hash, Eq, Default)]
+#[derive(Clone, PartialEq, Hash, Eq, Default, Debug)]
 pub struct VariableLengthKey(pub Vec<u8>);
 
 pub trait KeyAdapter:
-    Clone + PartialEq + Hash + Eq + Borrow<[u8]> + From<Vec<u8>> + Send + Sync + 'static
+    Clone + PartialEq + Hash + Eq + Borrow<[u8]> + From<Vec<u8>> + Send + Sync + Debug + 'static
 {
 }
 
@@ -104,7 +105,8 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 data: RwLock::new(HashMap::new()).into(),
             });
         }
-        let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config, true)?;
+        let snapshot_writers = Self::create_write_ahead_log_(&mut snapshot_set, &config, true)
+            .map_err(|e| format!("Failed to initialize write ahead log: {e}"))?;
         let mut self_ = Self {
             config,
             buckets: data,
@@ -114,7 +116,9 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             full_snapshot_writer_sender: None,
             update_counter: AtomicU64::new(0),
         };
-        self_.restore_from_snapshots_()?;
+        self_
+            .restore_from_snapshots_()
+            .map_err(|e| format!("Failed to restore prior snapshots and write ahead log: {e}"))?;
         self_.start_snapshot_writer_thread_();
         Ok(self_)
     }
@@ -134,7 +138,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             .unwrap()
     }
 
-    pub fn set(&self, key: TKey, value: Vec<u8>) -> &Store<TKey, TSS> {
+    pub fn set(&self, key: TKey, value: Vec<u8>) -> Result<&Store<TKey, TSS>, Box<dyn Error>> {
         let (bucket, hash) = Self::get_bucket_(&self.buckets, key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistent w.r.t. the in-memory map.
@@ -146,7 +150,9 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 .unwrap();
             let append_op = wal
                 .sequence_entry(key.borrow(), Some(&value))
-                .expect("Failed to sequence set op to write-ahead log");
+                .map_err(|e| {
+                    format!("Failed to sequence set({key:?}, ..) to write-ahead log: {e}")
+                })?;
 
             // Hold shorter lock on in-memory bucket to avoid blocking concurrent
             // readers on the full I/O operation.
@@ -158,11 +164,11 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             append_op
         })
         .commit()
-        .expect("Failed to commit set op to write-ahead log");
-        self
+        .map_err(|e| format!("Failed to commit set({key:?}, ..) to write-ahead log: {e}"))?;
+        Ok(self)
     }
 
-    pub fn unset(&self, key: &[u8]) -> &Store<TKey, TSS> {
+    pub fn unset(&self, key: &[u8]) -> Result<&Store<TKey, TSS>, Box<dyn Error>> {
         let (bucket, hash) = Self::get_bucket_(&self.buckets, key);
 
         // See notes on lock usage in set()
@@ -171,9 +177,9 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let mut wal = wal_outer[(hash % (wal_outer.len() as u64)) as usize]
                 .lock()
                 .unwrap();
-            let append_op = wal
-                .sequence_entry(key, None)
-                .expect("Failed to sequence unset op to write-ahead log");
+            let append_op = wal.sequence_entry(key, None).map_err(|e| {
+                format!("Failed to sequence unset({key:?}, ..) to write-ahead log: {e}")
+            })?;
 
             // Hold shorter lock on in-memory bucket to avoid blocking concurrent
             // readers on the full I/O operation.
@@ -185,8 +191,8 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             append_op
         })
         .commit()
-        .expect("Failed to commit unset op to write-ahead log");
-        self
+        .map_err(|e| format!("Failed to commit unset({key:?}, ..) to write-ahead log: {e}"))?;
+        Ok(self)
     }
 
     #[allow(dead_code)]
@@ -260,15 +266,14 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             // uncontested and thus near-free.
             let shard_paths = snapshot_path.shard_paths.clone();
             let buckets = &self.buckets;
-            thread
-                ::scope(
-                    |s| -> Result<(), String> {
-                        for chunk in shard_paths.chunks(
-                            snapshot_path.shard_paths
-                                .len()
-                                .div_ceil(self.config.target_io_parallelism_snapshots as usize)
-                        ) {
-                            s.spawn(
+            thread::scope(|s| -> Result<(), String> {
+                for chunk in shard_paths.chunks(
+                    snapshot_path
+                        .shard_paths
+                        .len()
+                        .div_ceil(self.config.target_io_parallelism_snapshots as usize),
+                ) {
+                    s.spawn(
                                 move || -> Result<(), String> {
                                     for shard in chunk {
                                         SnapshotReader::new(shard)
@@ -288,20 +293,16 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                                             })
                                             .map_err(|e|
                                                 format!(
-                                                    "Failed to read write-ahead log snapshot {:?} with error: {:?}",
-                                                    snapshot_path,
-                                                    e
+                                                    "Failed to read write-ahead log snapshot {snapshot_path:?} with error: {e}"
                                                 )
                                             )?;
                                     }
                                     Ok(())
                                 }
                             );
-                        }
-                        Ok(())
-                    }
-                )
-                .unwrap();
+                }
+                Ok(())
+            })?;
         }
         let elapsed = start_time.elapsed();
         if !self.config.silent {
@@ -337,13 +338,19 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                         while let Ok(queued_snapshot_task) = receiver.try_recv() {
                             snapshot_task = queued_snapshot_task;
                         }
-                        Self::write_and_finalize_snapshot_(
+                        if let Err(err) = Self::write_and_finalize_snapshot_(
                             &config_clone,
                             &wal_ref,
                             &buckets_ref,
                             &snapshot_set,
                             snapshot_task,
-                        );
+                        ) {
+                            eprintln!(
+                                "(Snapshot thread) Failed to write snapshot: {err}. As the snapshot was
+                                not completed, it possibly remains as 'pending' snapshot on disk but will not
+                                be read upon restart."
+                            );
+                        }
                     }
                 }
             }
@@ -384,7 +391,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         buckets: &Vec<Bucket<TKey>>,
         snapshot_set: &Mutex<TSS>,
         _snapshot_task: SnapshotTask,
-    ) {
+    ) -> Result<(), Box<dyn Error>> {
         let start_time = Instant::now();
         // Snapshot procedure:
         // 1) Allocate the snapshot in a pending state.
@@ -412,8 +419,9 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             let mut wal_outer = wal_ref.write().unwrap();
             let pending_snapshot = snapshot_set
                 .create_or_get_snapshot(SnapshotType::Pending, shard_count as u64, false)
-                .unwrap();
-            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, config, false).unwrap();
+                .map_err(|e| format!("Failed to create pending snapshot: {e}"))?;
+            *wal_outer = Self::create_write_ahead_log_(&mut snapshot_set, config, false)
+                .map_err(|e| format!("Failed to create new write ahead log: {e}"))?;
             pending_snapshot
         };
 
@@ -441,7 +449,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             }
             Ok(())
         })
-        .unwrap();
+        .map_err(|e| format!("Failed to write snapshot: {e}"))?;
 
         // TODO(acgessler): verify that the snapshot was written correctly before publishing.
         snapshot_set
@@ -455,6 +463,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                 pending_snapshot.ordinal, elapsed
             );
         }
+        Ok(())
     }
 
     fn write_buckets_to_snapshot_(
@@ -579,8 +588,12 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
 
         let store = create_store(&tmp_dir);
-        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .unwrap();
         assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
         assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
         drop(store);
@@ -594,7 +607,9 @@ mod tests {
     fn get_nonexisting() {
         let tmp_dir = TempDir::new().unwrap();
         let store = create_store(&tmp_dir);
-        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
         assert_eq!(store.get(b"bar"), None);
         drop(store);
 
@@ -607,11 +622,17 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
 
         let store = create_store(&tmp_dir);
-        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
-        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .unwrap();
         assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
         assert_eq!(store.get(b"bar"), Some(b"2".to_vec()));
-        store.set(VariableLengthKey(b"bar".to_vec()), b"3".to_vec());
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"3".to_vec())
+            .unwrap();
         assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
         assert_eq!(store.get(b"bar"), Some(b"3".to_vec()));
         drop(store);
@@ -626,9 +647,11 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
 
         let store = create_store(&tmp_dir);
-        store.set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
         assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
-        store.unset(b"foo");
+        store.unset(b"foo").unwrap();
         assert_eq!(store.get(b"foo"), None);
         drop(store);
 
@@ -648,7 +671,8 @@ mod tests {
                 ..Config::default()
             },
         )
-        .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec());
+        .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+        .unwrap();
 
         // Verify existence of snapshot files directly:
         //  (Ord=1, Diff) used to be the write-ahead log and has been deleted.
@@ -681,10 +705,14 @@ mod tests {
                 ..Config::default()
             },
         );
-        store.set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec());
-        store.set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec());
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .unwrap();
+        store
+            .set(VariableLengthKey(b"baz".to_vec()), b"3".to_vec())
+            .unwrap();
         store.testonly_wait_for_pending_snapshots();
-        store.unset(b"foo");
+        store.unset(b"foo").unwrap();
         drop(store);
 
         // Verify existence of snapshot files directly again.

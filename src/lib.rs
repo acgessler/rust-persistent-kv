@@ -45,8 +45,22 @@ where
     K: SerializableKey,
     V: SerializableValue + SerializableKey,
 {
-    pub fn new(path: &std::path::Path, config: Config) -> Result<Self, Box<dyn Error>> {
-        let snapshot_set = FileSnapshotSet::new(path)?;
+    /// Constructs a new store instance.
+    /// The store will be backed by the given path and use the provided configuration.
+    /// This function will block on restoring previously saved state from disk.
+    ///
+    /// # Example
+    /// ```
+    /// use persistent_kv::{Config, PersistentKeyValueStore};
+    /// let store: PersistentKeyValueStore<String, String> =
+    ///     PersistentKeyValueStore::new("/tmp/mystore", Config::default()).unwrap();
+    /// ```
+    /// # Errors
+    ///
+    /// Propagates IO errors when reading from disk, also fails when the snapshot files
+    /// don't follow the exact naming schema expected (and written) by this crate.
+    pub fn new(path: impl AsRef<std::path::Path>, config: Config) -> Result<Self, Box<dyn Error>> {
+        let snapshot_set = FileSnapshotSet::new(path.as_ref())?;
         Ok(Self {
             store: if <K as SerializableKey>::IS_FIXED_SIZE {
                 StoreImpl::FixedKey(Store::new(snapshot_set, config)?)
@@ -57,22 +71,43 @@ where
         })
     }
 
-    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) {
+    /// Sets a key-value pair in the store.
+    /// If the key already exists, the value will be overwritten.
+    /// # Example
+    /// ```
+    /// use persistent_kv::{Config, PersistentKeyValueStore};
+    /// let store: PersistentKeyValueStore<String, String> =
+    ///    PersistentKeyValueStore::new("/tmp/mystore", Config::default()).unwrap();
+    /// store.set("foo", "1").unwrap();
+    /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// ```
+    /// # Errors
+    /// Propagates any IO errors that occur directly as a result of the write operation.
+    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) -> Result<(), Box<dyn Error>> {
         let key = key.into();
         let value = value.into().serialize().into_owned(); //  TODO: Serde
         match &self.store {
-            StoreImpl::FixedKey(store) => {
-                store.set(
+            StoreImpl::FixedKey(store) => store
+                .set(
                     FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()),
                     value,
-                );
-            }
-            StoreImpl::VariableKey(store) => {
-                store.set(VariableLengthKey(key.serialize().into_owned()), value);
-            }
+                )
+                .map(|_| ()),
+            StoreImpl::VariableKey(store) => store
+                .set(VariableLengthKey(key.serialize().into_owned()), value)
+                .map(|_| ()),
         }
     }
 
+    /// Retrieves a value from the store.
+    /// # Example
+    /// ``` rust
+    /// use persistent_kv::{Config, PersistentKeyValueStore};
+    /// let store: PersistentKeyValueStore<String, String> =
+    ///    PersistentKeyValueStore::new("/tmp/mystore", Config::default()).unwrap();
+    /// store.set("foo", "1").unwrap();
+    /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -87,18 +122,29 @@ where
         }
     }
 
-    pub fn unset<Q>(&self, key: &Q)
+    /// Removes a key from the store.
+    /// # Example
+    /// ``` rust
+    /// use persistent_kv::{Config, PersistentKeyValueStore};
+    /// let store: PersistentKeyValueStore<String, String> =
+    ///     PersistentKeyValueStore::new("/tmp/mystore", Config::default()).unwrap();
+    /// store.set("foo", "1").unwrap();
+    /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// store.unset("foo").unwrap();
+    /// assert_eq!(store.get("foo"), None);
+    /// ```
+    /// # Errors
+    /// Propagates any IO errors that occur directly as a result of the write operation.
+    pub fn unset<Q>(&self, key: &Q) -> Result<(), Box<dyn Error>>
     where
         K: Borrow<Q>,
         Q: ?Sized + SerializableKey,
     {
         match &self.store {
-            StoreImpl::FixedKey(store) => {
-                store.unset(key.serialize_fixed_size().unwrap().borrow());
-            }
-            StoreImpl::VariableKey(store) => {
-                store.unset(key.serialize().borrow());
-            }
+            StoreImpl::FixedKey(store) => store
+                .unset(key.serialize_fixed_size().unwrap().borrow())
+                .map(|_| ()),
+            StoreImpl::VariableKey(store) => store.unset(key.serialize().borrow()).map(|_| ()),
         }
     }
 }
@@ -191,8 +237,10 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<String, String> =
             PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
-        store.set("foo", "1");
+        store.set("foo", "1").unwrap();
         assert_eq!(store.get("foo"), Some("1".to_string()));
+        store.unset("foo").unwrap();
+        assert_eq!(store.get("foo"), None);
     }
 
     #[test]
@@ -200,8 +248,10 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<u64, u64> =
             PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
-        store.set(35293853295u64, 1139131311u64);
+        store.set(35293853295u64, 1139131311u64).unwrap();
         assert_eq!(store.get(&35293853295u64), Some(1139131311u64));
+        store.unset(&35293853295u64).unwrap();
+        assert_eq!(store.get(&35293853295u64), None);
     }
 
     #[test]
@@ -209,7 +259,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let store: PersistentKeyValueStore<i32, i32> =
             PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
-        store.set(352938539, 113913131);
+        store.set(352938539, 113913131).unwrap();
         assert_eq!(store.get(&352938539), Some(113913131));
+        store.unset(&352938539).unwrap();
+        assert_eq!(store.get(&352938539), None);
     }
 }

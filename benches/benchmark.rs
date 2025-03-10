@@ -27,7 +27,9 @@ where
         join_handles.push(std::thread::spawn(move || {
             for i in 0..n {
                 // Keys are repeated across threads to trigger contention
-                store_ref.set(black_box(key(i)), value_clone.clone());
+                store_ref
+                    .set(black_box(key(i)), value_clone.clone())
+                    .unwrap();
             }
         }));
     }
@@ -55,7 +57,7 @@ fn random_key_reads<KeyType, F>(
         Arc::new(PersistentKeyValueStore::new(tmp_dir.path(), config).unwrap());
 
     for i in 0..key_count {
-        store.set(key(i), value.clone());
+        store.set(key(i), value.clone()).unwrap();
     }
 
     let mut join_handles = Vec::new();
@@ -98,7 +100,7 @@ fn snapshot_and_restore_heavy_rw_load(
                 for i in 0..n {
                     // Keys are not repeated to increase data size each iteration
                     let key = i + t * n + k * n * threads;
-                    store_ref.set(key, value_clone.clone());
+                    store_ref.set(key, value_clone.clone()).unwrap();
                     // Perform a large number of reads to trigger contention against other writes
                     for k in 0..r_w_ratio {
                         black_box(store_ref.get(&(key + k)));

@@ -10,6 +10,8 @@ use std::{
     },
 };
 
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::fs::FileExt;
 
@@ -82,10 +84,8 @@ impl SnapshotWriter {
         value: Option<&[u8]>,
     ) -> Result<SequencedAppendOp, Box<dyn std::error::Error>> {
         // Reuse entry and byte buffer memory to avoid unnecessary allocations
-        Self::ENTRY.with(|entry| {
-            Self::BUFFER.with(|buffer| {
-                let mut entry = entry.borrow_mut();
-                let mut buffer = buffer.borrow_mut();
+        Self::ENTRY.with_borrow_mut(|entry| {
+            Self::BUFFER.with_borrow_mut(|buffer| {
                 entry.value.clear();
                 if let Some(value) = value {
                     entry.value.extend_from_slice(value);
@@ -214,7 +214,8 @@ impl WriterImpl {
                 let mut bytes_written = 0;
                 let length = buffer.len();
                 while bytes_written < length {
-                    let bytes = file.seek_write(
+                    let bytes = Self::seek_write_(
+                        file,
                         &buffer[bytes_written..length],
                         offset + (bytes_written as u64),
                     )?;
@@ -223,6 +224,22 @@ impl WriterImpl {
                 Ok(())
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn seek_write_(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
+        file.seek_write(&buffer, offset)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn seek_write_(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
+        file.write_at(&buffer, offset)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    fn seek_write_(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
+        use core::panic;
+        panic!("Unsupported OS for seek_write");
     }
 }
 

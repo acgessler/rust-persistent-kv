@@ -9,7 +9,7 @@ fn value_string_with_length(length: usize) -> String {
 
 fn random_key_writes<KeyType, F>(n: u64, threads: usize, key: F, value: String)
 where
-    KeyType: persistent_kv::SerializableKey + 'static,
+    KeyType: persistent_kv::Serializable + 'static,
     F: Sync + Send + Copy + 'static + Fn(u64) -> KeyType,
 {
     let config = persistent_kv::Config {
@@ -45,7 +45,7 @@ fn random_key_reads<KeyType, F>(
     key: F,
     value: String,
 ) where
-    KeyType: persistent_kv::SerializableKey + 'static,
+    KeyType: persistent_kv::Serializable + 'static,
     F: Sync + Send + Copy + 'static + Fn(u64) -> KeyType,
 {
     let config = persistent_kv::Config {

@@ -104,10 +104,8 @@ impl SnapshotWriter {
                     ))
                 } else {
                     match self.file {
-                        WriterImpl::Buffered(ref file) => {
-                            file.lock().unwrap().write_all(&buffer)?
-                        }
-                        WriterImpl::Unbuffered(ref mut file) => file.write_all(&buffer)?,
+                        WriterImpl::Buffered(ref file) => file.lock().unwrap().write_all(buffer)?,
+                        WriterImpl::Unbuffered(ref mut file) => file.write_all(buffer)?,
                     }
                     None
                 };
@@ -226,12 +224,12 @@ impl WriterImpl {
 
     #[cfg(target_os = "windows")]
     fn seek_write_(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
-        file.seek_write(&buffer, offset)
+        file.seek_write(buffer, offset)
     }
 
     #[cfg(target_os = "linux")]
     fn seek_write_(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
-        file.write_at(&buffer, offset)
+        file.write_at(buffer, offset)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]

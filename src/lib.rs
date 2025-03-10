@@ -1,12 +1,60 @@
-//! Persistent key value store.
+//! Key value store with all data held in memory but also persisted to disk for durability.
 //!
-//! Persistence is achieved via
-//!  - full snapshots that are periodically written to disk
-//!  - write-ahead log (WAL) to capture recent additions
+//! The store is designed to be used as a building block for distributed systems that require
+//! a high-throughput, low-latency key-value store with persistence guarantees.
+//!
+//! # Design goals
+//!
+//!  - Support concurrent read/writes with minimal locking times
+//!  - Maximize block device throughput and exploit I/O parallelism if supported by OS and hardware
+//!  - Low memory overhead beyond the actual data stored and no spike during snapshotting
+//!  - Tunable write throughput / persistence guarantee trade-off via configuration
+//!  - Support for both fixed-size and variable-size keys and values
+//!
+//! # Key and value format
+//!
+//! Both the key and the value side of the store operate exclusively on byte sequences,
+//! converted from high level types via the [`Serializable`] and [`Deserializable`] traits.
+//! This avoids deviation between in-memory representation of objects and their serialized
+//! form, which could otherwise lead to subtle bugs. As a result of operating on serialized
+//! data only, none of [`Send`] and [`Sync`] and none of the hash map traits [`Hash`] or
+//! [`Eq`] are technically required for the key and value types.
+//!
+//! All fixed-size integer types, [`Vec<u8>`] and [`String`] are supported out of the box
+//! as both keys and values. On the value side, [`prost::Message`] types are also directly
+//! supported using the xxx_proto family of methods.
+//!
+//! # Implementation notes
+//!
+//! Persistence is implemented via a write-ahead log that is periodically compacted and
+//! replaced by full snapshots. All files are stored in a single folder. Individual snapshots
+//! can be internally sharded to ease parallel processing and keep file size reasonable.
+//! See the [`snapshot_set`] module for details on snapshot format.
+//!
+//! The on-disk format is a series of records. Each record is a protobuf message prefixed
+//! by a varint encoded length.
+//!
+//! # Performance notes
+//!
+//! If performance or throughput is a concern, you must benchmark and tune store configuration for
+//! the exact hardware and OS you are targeting.
+//!
+//! Defaults in [`Config`] are ok as a starting point and were derived as follows:
+//!
+//!   1) Linux sees a 2-3x improvement in write throughput when using positioned writes (enabled)
+//!   but the same setting has slightly negative effects on Windows (disabled).
+//!
+//!   2) No OS seems to benefit from sharding the write-ahead log (default is 1)
+//!
+//!   3) Target parallelism for snapshot reads/writes is limited by I/O controller concurrency which
+//!   varies by device type (default is 8 which should suit most modern SSDs).
+//!
+//!   4) The number of memory buckets is never a huge factor, as a rule of thumb it should be
+//!   above the number of simultaneous readers (default is 32)
 
 mod config;
 mod snapshot;
-mod snapshot_set;
+pub mod snapshot_set;
 mod store;
 mod types;
 
@@ -76,6 +124,7 @@ where
     }
 
     /// Removes a key from the store.
+    /// Supports using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
     /// ``` rust
     /// use persistent_kv::{Config, PersistentKeyValueStore};
@@ -154,6 +203,7 @@ where
     }
 
     /// Retrieves a value from the store.
+    /// Supports lookups using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
     /// ``` rust
     /// use persistent_kv::{Config, PersistentKeyValueStore};
@@ -204,6 +254,7 @@ where
     }
 
     /// Retrieves a protobuf-coded value from the store.
+    /// Supports lookups using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
     /// ```
     /// use prost::Message;

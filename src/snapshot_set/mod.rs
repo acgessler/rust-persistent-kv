@@ -63,13 +63,17 @@ impl SnapshotInfo {
 /// This type only manages file names and creates/removes files as a whole, it does
 /// not actually read/write snapshots _contents_.
 ///
-/// Snapshot files are named in the format `snapshot_<ordinal>_<type>.bin` where
-/// `<ordinal>` is a monotonically increasing number and `<type>` is one of
-/// `diff`, `full`, or `pending` where `pending` should be renamed to `full`
-/// once the snapshot is complete and published.
+/// Snapshot files are always of the format
+///   `snapshot_<ordinal>_<shard>-of-<shard-count>_<type>.bin`
 ///
-/// <ordinal> is used to determine the order of snapshots independent of file
-/// system modification times which could be tampered with.
+/// Name components:
+///  1) `<ordinal>` is a monotonically increasing sequence number
+///  2) `<type>` is one of `diff`, `full`, or `pending` where `pending` should be renamed to `full`
+///     once the snapshot is complete and published.
+///  3) `<shard>` is the shard number (0-based) of the snapshot
+///  4) `<shard-count>` is the total number of shards in the snapshot
+///
+/// `<ordinal>` must be processed in sequence, `<shard>` can be processed in parallel.
 ///
 /// TODO(acgessler): Add file based lock to prevent accidental construction of
 /// multiple SnapshotSet instances for the same folder.

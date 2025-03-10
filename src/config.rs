@@ -83,6 +83,10 @@ impl Default for Config {
             target_io_parallelism_snapshots: 8,
             target_io_parallelism_writelog: 1,
             target_snapshot_shard_size_bytes: 1024 * 1024 * 1024, // 1 GB
+
+            #[cfg(target_os = "windows")]
+            use_positioned_writes: false,
+            #[cfg(not(target_os = "windows"))]
             use_positioned_writes: true,
         }
     }

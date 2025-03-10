@@ -205,7 +205,7 @@ impl WriterImpl {
         match self {
             WriterImpl::Buffered(file) => {
                 let mut file = file.lock().unwrap();
-                file.get_mut().seek(std::io::SeekFrom::Start(offset))?;
+                file.seek(std::io::SeekFrom::Start(offset))?;
                 file.write_all(buffer)
             }
             WriterImpl::Unbuffered(file) => {

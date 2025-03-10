@@ -1,21 +1,21 @@
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SyncMode {
-    /// Execute a fs sync operation(s) after every single key write. This is
+    /// Execute a full sync operation(s) after every single key write. This is
     /// _very_ slow (~milliseconds) but minimizes risk of data loss. If the local
     /// process fails, data loss is not possible. In the event of a OS level failure
     /// or power event, data loss is unlikely but still technically possible e.g.
     /// if the hardware further delays writes without the OS knowing.
     /// Note: The implementation uses File::sync_all(), so all caveats from there apply.
-    SyncEveryWrite,
+    BlockAndSync,
 
-    /// Does not explicitly block or sync on file system operation(s). This is the
+    /// Blocks on but does not explicitly sync file system operation(s). This is the
     /// fastest option (~microseconds) but comes a the risk of data loss.
     /// Note: even in this mode, calling set() or unset() on a key still
     /// blocks on the write() syscall to append to the write log. This means that
     /// local process failures should not lead to data loss. OS level failures
     /// or power events are likely to lead to data loss concerning writes that occured
     /// in the seconds prior to the failure.
-    NoExplicitSync,
+    BlockNoExplicitSync,
 
     /// Allows for in-memory buffering of writes before writing to disk. There
     /// is no limit on the size of frequency of the buffer, so at worst a disk
@@ -78,7 +78,7 @@ impl Default for Config {
         Self {
             snapshot_interval: 10000,
             memory_bucket_count: 32,
-            sync_mode: SyncMode::NoExplicitSync,
+            sync_mode: SyncMode::BlockNoExplicitSync,
             silent: false,
             target_io_parallelism_snapshots: 8,
             target_io_parallelism_writelog: 1,

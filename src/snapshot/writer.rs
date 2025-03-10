@@ -114,7 +114,7 @@ impl SnapshotWriter {
 
                 Ok(SequencedAppendOp {
                     file: self.file.clone(),
-                    should_sync: self.config.sync_mode == SyncMode::SyncEveryWrite,
+                    should_sync: self.config.sync_mode == SyncMode::BlockAndSync,
                     should_write_at_offset,
                     _is_not_send: PhantomData,
                 })
@@ -168,10 +168,8 @@ impl SequencedAppendOp {
     fn write_at_offset(&mut self) -> std::io::Result<()> {
         let (offset, length) = self.should_write_at_offset.unwrap();
         self.should_write_at_offset = None;
-        SnapshotWriter::BUFFER.with(|buffer| {
-            self.file
-                .seek_write_all(&buffer.borrow_mut()[..length], offset)
-        })
+        SnapshotWriter::BUFFER
+            .with_borrow_mut(|buffer| self.file.seek_write_all(&buffer[..length], offset))
     }
 }
 

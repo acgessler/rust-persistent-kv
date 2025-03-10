@@ -24,19 +24,19 @@ mod tests {
     fn write_configs() -> Vec<SnapshotWriterConfig> {
         vec![
             SnapshotWriterConfig {
-                sync_mode: SyncMode::SyncEveryWrite,
+                sync_mode: SyncMode::BlockAndSync,
                 use_positioned_writes: false,
             },
             SnapshotWriterConfig {
-                sync_mode: SyncMode::SyncEveryWrite,
+                sync_mode: SyncMode::BlockAndSync,
                 use_positioned_writes: true,
             },
             SnapshotWriterConfig {
-                sync_mode: SyncMode::NoExplicitSync,
+                sync_mode: SyncMode::BlockNoExplicitSync,
                 use_positioned_writes: false,
             },
             SnapshotWriterConfig {
-                sync_mode: SyncMode::NoExplicitSync,
+                sync_mode: SyncMode::BlockNoExplicitSync,
                 use_positioned_writes: true,
             },
             SnapshotWriterConfig {

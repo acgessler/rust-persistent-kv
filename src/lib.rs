@@ -75,6 +75,8 @@ use store::{FixedLengthKey64Bit, Store, StoreImpl, VariableLengthKey};
 
 pub use config::{Config, SyncMode};
 
+pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync + 'static>>;
+
 pub struct PersistentKeyValueStore<K, V> {
     store: StoreImpl,
     phantom: std::marker::PhantomData<(K, V)>,
@@ -112,18 +114,26 @@ where
     ///
     /// # Example
     /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use persistent_kv::{Config, PersistentKeyValueStore};
+    /// let path = "/tmp/mystore1";
     /// let store: PersistentKeyValueStore<String, String> =
-    ///     PersistentKeyValueStore::new("/tmp/mystore1", Config::default()).unwrap();
+    ///     PersistentKeyValueStore::new(path, Config::default())?;
+    /// store.set("foo", "1")?;
+    /// // Drop the first store instance to ensure no two instances are alive.
+    /// drop(store);
+    /// // Second instance constructed from same path recovers the data.
+    /// let store: PersistentKeyValueStore<String, String> =
+    ///     PersistentKeyValueStore::new(path, Config::default())?;
+    /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// # Ok(())
+    /// # }
     /// ```
     /// # Errors
     ///
     /// Propagates IO errors when reading from disk, also fails when the snapshot files
     /// don't follow the exact naming schema expected (and written) by this crate.
-    pub fn new(
-        path: impl AsRef<std::path::Path>,
-        config: Config,
-    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    pub fn new(path: impl AsRef<std::path::Path>, config: Config) -> Result<Self> {
         let snapshot_set = FileSnapshotSet::new(path.as_ref())?;
         Ok(Self {
             store: if <K as Serializable>::IS_FIXED_SIZE {
@@ -138,18 +148,21 @@ where
     /// Removes a key from the store.
     /// Supports using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
-    /// ``` rust
+    /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use persistent_kv::{Config, PersistentKeyValueStore};
     /// let store: PersistentKeyValueStore<String, String> =
-    ///     PersistentKeyValueStore::new("/tmp/mystore2", Config::default()).unwrap();
-    /// store.set("foo", "1").unwrap();
+    ///     PersistentKeyValueStore::new("/tmp/mystore2", Config::default())?;
+    /// store.set("foo", "1")?;
     /// assert_eq!(store.get("foo"), Some("1".to_string()));
-    /// store.unset("foo").unwrap();
+    /// store.unset("foo")?;
     /// assert_eq!(store.get("foo"), None);
+    /// # Ok(())
+    /// # }
     /// ```
     /// # Errors
     /// Propagates any IO errors that occur directly as a result of the write operation.
-    pub fn unset<Q>(&self, key: &Q) -> Result<(), Box<dyn Error + Send + Sync>>
+    pub fn unset<Q>(&self, key: &Q) -> Result<()>
     where
         K: Borrow<Q>,
         Q: ?Sized + Serializable,
@@ -162,7 +175,7 @@ where
         }
     }
 
-    fn set_(&self, key: K, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn set_(&self, key: K, value: Vec<u8>) -> Result<()> {
         match &self.store {
             StoreImpl::FixedKey(store) => store
                 .set(
@@ -202,31 +215,33 @@ where
     /// If the key already exists, the value will be overwritten.
     /// # Example
     /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use persistent_kv::{Config, PersistentKeyValueStore};
     /// let store: PersistentKeyValueStore<String, String> =
-    ///    PersistentKeyValueStore::new("/tmp/mystore3", Config::default()).unwrap();
-    /// store.set("foo", "1").unwrap();
+    ///    PersistentKeyValueStore::new("/tmp/mystore3", Config::default())?;
+    /// store.set("foo", "1")?;
     /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// # Ok(())
+    /// # }
     /// ```
     /// # Errors
     /// Propagates any IO errors that occur directly as a result of the write operation.
-    pub fn set(
-        &self,
-        key: impl Into<K>,
-        value: impl Into<V>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) -> Result<()> {
         self.set_(key.into(), value.into().serialize().into_owned())
     }
 
     /// Retrieves a value from the store.
     /// Supports lookups using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
-    /// ``` rust
+    /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use persistent_kv::{Config, PersistentKeyValueStore};
     /// let store: PersistentKeyValueStore<String, String> =
-    ///    PersistentKeyValueStore::new("/tmp/mystore4", Config::default()).unwrap();
-    /// store.set("foo", "1").unwrap();
+    ///    PersistentKeyValueStore::new("/tmp/mystore4", Config::default())?;
+    /// store.set("foo", "1")?;
     /// assert_eq!(store.get("foo"), Some("1".to_string()));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
@@ -247,6 +262,7 @@ where
     /// If the key already exists, the value will be overwritten.
     /// # Example
     /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use prost::Message;
     /// use persistent_kv::{Config, PersistentKeyValueStore};
     /// #[derive(Clone, PartialEq, Message)]
@@ -255,17 +271,15 @@ where
     ///     pub bar: u32,
     /// }
     /// let store: PersistentKeyValueStore<String, Foo> =
-    ///    PersistentKeyValueStore::new("/tmp/mystore5", Config::default()).unwrap();
-    /// store.set_proto("foo", Foo {bar: 42}).unwrap();
-    /// assert_eq!(store.get_proto("foo").unwrap(), Some(Foo {bar: 42}));
+    ///    PersistentKeyValueStore::new("/tmp/mystore5", Config::default())?;
+    /// store.set_proto("foo", Foo {bar: 42})?;
+    /// assert_eq!(store.get_proto("foo")?, Some(Foo {bar: 42}));
+    /// # Ok(())
+    /// # }
     /// ```
     /// # Errors
     /// Propagates any IO errors that occur directly as a result of the write operation.
-    pub fn set_proto(
-        &self,
-        key: impl Into<K>,
-        value: impl prost::Message,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub fn set_proto(&self, key: impl Into<K>, value: impl prost::Message) -> Result<()> {
         self.set_(key.into(), value.encode_to_vec())
     }
 
@@ -273,6 +287,7 @@ where
     /// Supports lookups using borrowed keys (e.g. [`str`] for a [`String`] key).
     /// # Example
     /// ```
+    /// # fn main() -> persistent_kv::Result<()> {
     /// use prost::Message;
     /// use persistent_kv::{Config, PersistentKeyValueStore};
     /// #[derive(Clone, PartialEq, Message)]
@@ -281,13 +296,15 @@ where
     ///     pub bar: u32,
     /// }
     /// let store: PersistentKeyValueStore<String, Foo> =
-    ///    PersistentKeyValueStore::new("/tmp/mystore6", Config::default()).unwrap();
-    /// store.set_proto("foo", Foo {bar: 42}).unwrap();
-    /// assert_eq!(store.get_proto("foo").unwrap(), Some(Foo {bar: 42}));
+    ///    PersistentKeyValueStore::new("/tmp/mystore6", Config::default())?;
+    /// store.set_proto("foo", Foo {bar: 42})?;
+    /// assert_eq!(store.get_proto("foo")?, Some(Foo {bar: 42}));
+    /// # Ok(())
+    /// # }
     /// ```
     /// # Errors
     /// Forwards proto decode errors.
-    pub fn get_proto<Q>(&self, key: &Q) -> Result<Option<V>, prost::DecodeError>
+    pub fn get_proto<Q>(&self, key: &Q) -> std::result::Result<Option<V>, prost::DecodeError>
     where
         K: Borrow<Q>,
         Q: ?Sized + Serializable,

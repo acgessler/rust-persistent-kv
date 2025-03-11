@@ -3,7 +3,7 @@
 This project is a simple implementation of a persistent, unordered key-value store in Rust.
 This is intended as building block for applications that need all of _{concurrent reads and
 writes, ultra low latency, high durability}_ and meet all of _{data fits into RAM, keys are
-unordered}_. Basically a concurrent hashmap that keeps its contents!
+unordered, single process}_. Basically a concurrent hashmap that keeps its contents!
 
 Under the hood, the store implements persistence via a write-ahead log that is periodically
 compacted into snapshots. Where possible, it employs parallel reads/writes to make

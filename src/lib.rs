@@ -120,7 +120,10 @@ where
     ///
     /// Propagates IO errors when reading from disk, also fails when the snapshot files
     /// don't follow the exact naming schema expected (and written) by this crate.
-    pub fn new(path: impl AsRef<std::path::Path>, config: Config) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        path: impl AsRef<std::path::Path>,
+        config: Config,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let snapshot_set = FileSnapshotSet::new(path.as_ref())?;
         Ok(Self {
             store: if <K as Serializable>::IS_FIXED_SIZE {
@@ -146,7 +149,7 @@ where
     /// ```
     /// # Errors
     /// Propagates any IO errors that occur directly as a result of the write operation.
-    pub fn unset<Q>(&self, key: &Q) -> Result<(), Box<dyn Error>>
+    pub fn unset<Q>(&self, key: &Q) -> Result<(), Box<dyn Error + Send + Sync>>
     where
         K: Borrow<Q>,
         Q: ?Sized + Serializable,
@@ -159,7 +162,7 @@ where
         }
     }
 
-    fn set_(&self, key: K, value: Vec<u8>) -> Result<(), Box<dyn Error>> {
+    fn set_(&self, key: K, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &self.store {
             StoreImpl::FixedKey(store) => store
                 .set(
@@ -207,7 +210,11 @@ where
     /// ```
     /// # Errors
     /// Propagates any IO errors that occur directly as a result of the write operation.
-    pub fn set(&self, key: impl Into<K>, value: impl Into<V>) -> Result<(), Box<dyn Error>> {
+    pub fn set(
+        &self,
+        key: impl Into<K>,
+        value: impl Into<V>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.set_(key.into(), value.into().serialize().into_owned())
     }
 
@@ -258,7 +265,7 @@ where
         &self,
         key: impl Into<K>,
         value: impl prost::Message,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.set_(key.into(), value.encode_to_vec())
     }
 
@@ -314,6 +321,12 @@ mod tests {
     // This set of tests is not exhaustive as the store itself is tested in-depth in the store module.
     // Below tests focus on the public API and the serialization/deserialization traits in as far
     // as the doctests don't already cover them.
+
+    #[test]
+    fn test_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PersistentKeyValueStore<u32, u32>>();
+    }
 
     #[test]
     fn setget_string_string() {

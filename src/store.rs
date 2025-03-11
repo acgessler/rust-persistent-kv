@@ -98,7 +98,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Drop for Store<TKey, TSS> {
 }
 
 impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
-    pub fn new(mut snapshot_set: TSS, config: Config) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        mut snapshot_set: TSS,
+        config: Config,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut data = Vec::with_capacity(config.memory_bucket_count);
         for _ in 0..config.memory_bucket_count {
             data.push(Bucket {
@@ -138,7 +141,11 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             .unwrap()
     }
 
-    pub fn set(&self, key: TKey, value: Vec<u8>) -> Result<&Store<TKey, TSS>, Box<dyn Error>> {
+    pub fn set(
+        &self,
+        key: TKey,
+        value: Vec<u8>,
+    ) -> Result<&Store<TKey, TSS>, Box<dyn Error + Send + Sync>> {
         let (bucket, hash) = Self::get_bucket_(&self.buckets, key.borrow());
         // Hold lock on WAL throughout entire write operation to ensure that the
         // write-ahead log is consistent w.r.t. the in-memory map.
@@ -168,7 +175,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
         Ok(self)
     }
 
-    pub fn unset(&self, key: &[u8]) -> Result<&Store<TKey, TSS>, Box<dyn Error>> {
+    pub fn unset(&self, key: &[u8]) -> Result<&Store<TKey, TSS>, Box<dyn Error + Send + Sync>> {
         let (bucket, hash) = Self::get_bucket_(&self.buckets, key);
 
         // See notes on lock usage in set()
@@ -254,7 +261,7 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             .collect())
     }
 
-    fn restore_from_snapshots_(&mut self) -> Result<(), Box<dyn Error>> {
+    fn restore_from_snapshots_(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let start_time = Instant::now();
         let snapshot_set = self.snapshot_set.lock().unwrap();
         let snapshots_to_restore = snapshot_set.get_snapshots_to_restore();
@@ -273,33 +280,32 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
                         .len()
                         .div_ceil(self.config.target_io_parallelism_snapshots as usize),
                 ) {
-                    s.spawn(
-                                move || -> Result<(), String> {
-                                    for shard in chunk {
-                                        SnapshotReader::new(shard)
-                                            .read_entries(|entry| {
-                                                let key: TKey = entry.key.to_owned().into();
-                                                let bucket = Self::get_bucket_(
-                                                    buckets,
-                                                    key.borrow()
-                                                ).0;
-                                                let mut data = bucket.data.write().unwrap();
+                    s.spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+                        for shard in chunk {
+                            SnapshotReader::new(shard)
+                                .read_entries(|entry| {
+                                    let key: TKey = entry.key.to_owned().into();
+                                    let bucket = Self::get_bucket_(
+                                        buckets,
+                                        key.borrow()
+                                    ).0;
+                                    let mut data = bucket.data.write().unwrap();
 
-                                                if entry.value.is_empty() {
-                                                    data.remove(key.borrow());
-                                                } else {
-                                                    data.insert(key, entry.value.clone());
-                                                }
-                                            })
-                                            .map_err(|e|
-                                                format!(
-                                                    "Failed to read write-ahead log snapshot {snapshot_path:?} with error: {e}"
-                                                )
-                                            )?;
+                                    if entry.value.is_empty() {
+                                        data.remove(key.borrow());
+                                    } else {
+                                        data.insert(key, entry.value.clone());
                                     }
-                                    Ok(())
-                                }
-                            );
+                                })
+                                .map_err(|e|
+                                    format!(
+                                        "Failed to read write-ahead log snapshot {snapshot_path:?} with error: {e}"
+                                    )
+                                )?;
+                        }
+                        Ok(())
+                        }
+                    );
                 }
                 Ok(())
             })?;

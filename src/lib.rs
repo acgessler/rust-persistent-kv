@@ -5,6 +5,7 @@
 //!
 //! # Design goals
 //!
+//!  - Lightweight and with few dependencies
 //!  - Support concurrent read/writes with minimal locking times
 //!  - Tunable write throughput / persistence guarantee trade-off
 //!  - Maximize block device throughput and exploit I/O parallelism if supported by OS and hardware
@@ -12,11 +13,15 @@
 //!    no spikes during snapshotting)
 //!  - Support for both fixed-size and variable-size keys and values
 //!
+//! A good mental model is "Hashmap that keeps its contents between program runs". If more
+//! advanced database features are required, [RocksDB](https://docs.rs/rocksdb/latest/rocksdb/)
+//! or [SQLite](https://docs.rs/sqlite/latest/sqlite/) are a better choice.
+//!
 //! # Key and value format
 //!
 //! Both the key and the value side of the store operate exclusively on byte sequences,
-//! converted from high level types via the [`Serializable`] and [`Deserializable`] traits.
-//! This avoids deviation between in-memory representation of objects and their serialized
+//! converted from high level types via the [`crate::Serializable`] and [`crate::Deserializable`]
+//! traits. This avoids deviation between in-memory representation of objects and their serialized
 //! form, which could otherwise lead to subtle bugs. As a result of operating on serialized
 //! data only, none of [`Send`] and [`Sync`] and none of the hash map traits [`Hash`] or
 //! [`Eq`] are technically required for the key and value types.
@@ -52,10 +57,6 @@
 //!
 //!   4) The number of memory buckets is never a huge factor, as a rule of thumb it should be
 //!   above the number of simultaneous readers (default is 32)
-//!
-//! # Q&A
-//!
-//! **Q:** What
 mod config;
 mod snapshot;
 pub mod snapshot_set;

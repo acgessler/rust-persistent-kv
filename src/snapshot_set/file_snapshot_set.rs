@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use fs2::FileExt;
 use regex::Regex;
 
 use super::{SnapshotInfo, SnapshotOrdinal, SnapshotSet, SnapshotType};
@@ -12,10 +13,23 @@ use super::{SnapshotInfo, SnapshotOrdinal, SnapshotSet, SnapshotType};
 /// Implementation of SnapshotSet using files on disk that exactly mirror the state
 /// in memory, i.e., each entry in `snapshots` corresponds to a file in the folder, even
 /// if the file is empty.
+///
+/// Snapshot files are always of the format
+///   `snapshot_<ordinal>_<shard>-of-<shard-count>_<type>.bin`
+///
+/// Name components:
+///  1) `<ordinal>` is a monotonically increasing sequence number
+///  2) `<type>` is one of `diff`, `full`, or `pending` where `pending` should be renamed to `full`
+///     once the snapshot is complete and published.
+///  3) `<shard>` is the shard number (0-based) of the snapshot
+///  4) `<shard-count>` is the total number of shards in the snapshot
+///
+/// `<ordinal>` must be processed in sequence, `<shard>` can be processed in parallel.
 #[derive(Debug)]
 pub struct FileSnapshotSet {
     pub snapshots: Vec<SnapshotInfo>,
     folder: PathBuf,
+    lockfile: File,
 }
 
 impl FileSnapshotSet {
@@ -80,9 +94,13 @@ impl FileSnapshotSet {
             .iter_mut()
             .for_each(|snapshot| snapshot.shard_paths.sort());
 
+        // Ensure no other snapshotset instance is active in the same folder.
+        let lockfile = File::create(folder.join("lockfile"))?;
+        lockfile.try_lock_exclusive()?;
         Ok(Self {
             folder: folder.to_path_buf(),
             snapshots,
+            lockfile,
         })
     }
 
@@ -175,6 +193,12 @@ impl FileSnapshotSet {
             }
         };
         Some((ordinal, shard, shard_count, snapshot_type))
+    }
+}
+
+impl Drop for FileSnapshotSet {
+    fn drop(&mut self) {
+        <File as FileExt>::unlock(&self.lockfile).unwrap();
     }
 }
 
@@ -475,7 +499,8 @@ mod tests {
         );
 
         // Construct a new SnapShotSet to verify that the files were created on disk
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        drop(snapshot_set);
+        let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 5);
         assert_eq!(
             snapshot_set.snapshots[3].ordinal,
@@ -507,7 +532,8 @@ mod tests {
         );
 
         // Construct a new SnapShotSet to verify that no new files were created on disk
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        drop(snapshot_set);
+        let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 3);
     }
 
@@ -629,7 +655,8 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[1].ordinal, SnapshotOrdinal(4));
 
         // Construct a new SnapShotSet to verify that the file changes actually hit disk.
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        drop(snapshot_set);
+        let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 2);
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(3));
         assert_eq!(
@@ -655,6 +682,7 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
 
         // Construct a new SnapShotSet to verify that the file changes actually hit disk.
+        drop(snapshot_set);
         snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         assert_eq!(snapshot_set.snapshots.len(), 1);
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));

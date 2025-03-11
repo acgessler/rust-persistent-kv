@@ -110,7 +110,8 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[2].ordinal, SnapshotOrdinal(5));
 
         // Construct a new SnapShotSet to verify that the files were actually deleted.
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        drop(snapshot_set);
+        let mut snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
         snapshot_set.prune_backup_snapshots(0).unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 2);
@@ -134,7 +135,8 @@ mod tests {
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));
 
         // Construct a new SnapShotSet to verify that the files were actually deleted.
-        snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
+        drop(snapshot_set);
+        let snapshot_set = FileSnapshotSet::new(tmp_dir.path()).unwrap();
 
         assert_eq!(snapshot_set.snapshots.len(), 1);
         assert_eq!(snapshot_set.snapshots[0].ordinal, SnapshotOrdinal(2));

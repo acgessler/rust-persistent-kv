@@ -1,5 +1,5 @@
 pub mod admin;
-mod file_snapshot_set;
+pub mod file_snapshot_set;
 
 use std::{io, path::PathBuf};
 
@@ -62,21 +62,6 @@ impl SnapshotInfo {
 ///
 /// This type only manages file names and creates/removes files as a whole, it does
 /// not actually read/write snapshots _contents_.
-///
-/// Snapshot files are always of the format
-///   `snapshot_<ordinal>_<shard>-of-<shard-count>_<type>.bin`
-///
-/// Name components:
-///  1) `<ordinal>` is a monotonically increasing sequence number
-///  2) `<type>` is one of `diff`, `full`, or `pending` where `pending` should be renamed to `full`
-///     once the snapshot is complete and published.
-///  3) `<shard>` is the shard number (0-based) of the snapshot
-///  4) `<shard-count>` is the total number of shards in the snapshot
-///
-/// `<ordinal>` must be processed in sequence, `<shard>` can be processed in parallel.
-///
-/// TODO(acgessler): Add file based lock to prevent accidental construction of
-/// multiple SnapshotSet instances for the same folder.
 pub trait SnapshotSet: Send {
     /// Registers a new snapshot path usable for the given snapshot type.
     /// This will return a new snapshot path that can be used to write the snapshot to.

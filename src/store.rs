@@ -695,6 +695,7 @@ mod tests {
                 .len()
                 == 0
         );
+        drop(snapshot_set);
 
         // Create a fresh store instance and make a modification to two more keys (triggers
         // snapshot) and then delete a third (does not trigger snapshot)

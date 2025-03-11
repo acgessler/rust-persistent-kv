@@ -1,7 +1,9 @@
-//! Unordered key-value store with all data held in memory but also persisted to disk for durability.
+//! Unordered key-value store with all data held in memory but also persisted to disk
+//! for durability.
 //!
 //! The store is designed to be used as a building block for (distributed) systems that require
-//! a high-throughput, low-latency, unordered key-value store with persistence guarantees.
+//! a high-throughput, ultra low latency, unordered key-value store with persistence guarantee
+//! and can shard the data so that it always fits into the RAM of one machine.
 //!
 //! # Design goals
 //!
@@ -42,24 +44,24 @@
 //!
 //! # Performance notes
 //!
-//! If performance or throughput is a concern, you must benchmark and tune store configuration for
-//! the exact hardware and OS you are targeting.
+//! If performance or throughput is a concern, you must benchmark and tune store configuration
+//! for the exact hardware and OS you are targeting.
 //!
 //! Defaults in [`Config`] are ok as a starting point and were derived as follows:
 //!
-//!   1) Linux sees a 2-3x improvement in write throughput when using positioned writes (enabled)
-//!   but the same setting has slightly negative effects on Windows (disabled).
+//!   1) Linux sees a 2-3x improvement in write throughput when using positioned writes
+//!      (enabled) but the same setting has slightly negative effects on Windows (disabled).
 //!
 //!   2) No OS seems to benefit from sharding the write-ahead log (default is 1)
 //!
 //!   3) Target parallelism for snapshot reads/writes is limited by I/O controller concurrency which
-//!   varies by device type (default is 8 which should suit most modern SSDs).
+//!      varies by device type (default is 8 which should suit most modern SSDs).
 //!
 //!   4) The number of memory buckets is never a huge factor, as a rule of thumb it should be
-//!   above the number of simultaneous readers (default is 32)
+//!      above the number of simultaneous readers (default is 32)
 mod config;
 mod snapshot;
-pub mod snapshot_set;
+pub mod snapshot_set; // Accessible from outside the crate
 mod store;
 mod types;
 
@@ -71,14 +73,14 @@ use std::{
 use snapshot_set::FileSnapshotSet;
 use store::{FixedLengthKey64Bit, Store, StoreImpl, VariableLengthKey};
 
-pub use config::Config;
+pub use config::{Config, SyncMode};
 
 pub struct PersistentKeyValueStore<K, V> {
     store: StoreImpl,
     phantom: std::marker::PhantomData<(K, V)>,
 }
 
-// We don't need K to be Sync + Send as we only operate on the serialized version
+// We don't need K, V to be Sync + Send as we only operate on the serialized version
 // when passing the data between threads internally and the external interface
 // exposes only clones, not references.
 unsafe impl<K, V> Sync for PersistentKeyValueStore<K, V> {}
@@ -105,6 +107,8 @@ where
     /// Constructs a new store instance.
     /// The store will be backed by the given path and use the provided configuration.
     /// This function will block on restoring previously saved state from disk.
+    ///
+    /// Only one store instance can be alive at a time for a given path.
     ///
     /// # Example
     /// ```

@@ -1,14 +1,15 @@
-//! Key value store with all data held in memory but also persisted to disk for durability.
+//! Unordered key-value store with all data held in memory but also persisted to disk for durability.
 //!
-//! The store is designed to be used as a building block for distributed systems that require
-//! a high-throughput, low-latency key-value store with persistence guarantees.
+//! The store is designed to be used as a building block for (distributed) systems that require
+//! a high-throughput, low-latency, unordered key-value store with persistence guarantees.
 //!
 //! # Design goals
 //!
 //!  - Support concurrent read/writes with minimal locking times
+//!  - Tunable write throughput / persistence guarantee trade-off
 //!  - Maximize block device throughput and exploit I/O parallelism if supported by OS and hardware
-//!  - Low memory overhead beyond the actual data stored and no spike during snapshotting
-//!  - Tunable write throughput / persistence guarantee trade-off via configuration
+//!  - Amortized memory and disk usage is O(number of keys), <10% overhead over payload size (e.g.
+//!    no spikes during snapshotting)
 //!  - Support for both fixed-size and variable-size keys and values
 //!
 //! # Key and value format
@@ -51,7 +52,10 @@
 //!
 //!   4) The number of memory buckets is never a huge factor, as a rule of thumb it should be
 //!   above the number of simultaneous readers (default is 32)
-
+//!
+//! # Q&A
+//!
+//! **Q:** What
 mod config;
 mod snapshot;
 pub mod snapshot_set;

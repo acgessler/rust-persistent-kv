@@ -7,9 +7,7 @@ unordered, single process}_. Basically a concurrent hashmap that keeps its conte
 
 Under the hood, the store implements persistence via a write-ahead log that is periodically
 compacted into snapshots. Where possible, it employs parallel reads/writes to make
-best use of modern flash/SSD drives. By default, past snapshots are kept but there is a
-CLI to prune snapshots down to a target number of backups. Other ephemeral data, such as
-failed snapshots or past write logs are automatically deleted.
+best use of modern flash/SSD drives.
 
 See [main crate documentation](src/lib.rs) for design goals, data management and performance tuning.
 

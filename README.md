@@ -9,7 +9,7 @@ Under the hood, the store implements persistence via a write-ahead log that is p
 compacted into snapshots. Where possible, it employs parallel reads/writes to make
 best use of modern flash/SSD drives.
 
-See [main crate documentation](src/lib.rs) for design goals, data management and performance tuning.
+See [crate documentation](https://docs.rs/persistent-kv/latest/persistent_kv/) for design goals, data management and performance tuning.
 
 ## Getting Started
 

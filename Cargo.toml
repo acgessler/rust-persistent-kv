@@ -2,12 +2,15 @@
 name = "persistent-kv"
 version = "0.1.0"
 edition = "2021"
-authors = ["Alex Gessler <alexander.gessler@gmx.net>"]
+description = "Persistent key-value store"
+authors = ["Alexander Gessler <alexander.gessler@gmx.net>"]
 homepage = "https://github.com/acgessler/rust-persistent-kv"
 repository = "https://github.com/acgessler/rust-persistent-kv.git"
-keywords = ["databases", "key-value store", "persistent", "collection"]
+keywords = ["database", "key-value", "persistent", "collection", "concurrency"]
 categories = ["data-structures"]
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+exclude = [".*/", ".*"]
 
 [dependencies]
 prost = "0.13"

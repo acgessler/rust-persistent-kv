@@ -488,7 +488,7 @@ mod tests {
             PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
         store.set("foo", "1").unwrap();
         store.set("bar", "2").unwrap();
-        let mut iter = (&store).iter();
+        let mut iter = store.iter();
         assert_eq!(iter.next(), Some(("foo".to_string(), "1".to_string())));
         assert_eq!(iter.next(), Some(("bar".to_string(), "2".to_string())));
         assert_eq!(iter.next(), None);

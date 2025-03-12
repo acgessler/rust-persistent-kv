@@ -112,6 +112,14 @@ where
     ///
     /// Only one store instance can be alive at a time for a given path.
     ///
+    /// # Iterators
+    ///
+    /// The store acts like a collection and supports (read-only) [`Iterator`] but
+    /// does not support any mutating collection traits (e.g. [`FromIterator`] or
+    /// [`Extend`]). This is needed since set() is fallible.
+    ///
+    /// A consuming iterator consumes the in-memory store only, not the on-disk data.
+    ///
     /// # Example
     /// ```
     /// # fn main() -> persistent_kv::Result<()> {
@@ -175,20 +183,6 @@ where
         }
     }
 
-    fn set_(&self, key: K, value: Vec<u8>) -> Result<()> {
-        match &self.store {
-            StoreImpl::FixedKey(store) => store
-                .set(
-                    FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()),
-                    value,
-                )
-                .map(|_| ()),
-            StoreImpl::VariableKey(store) => store
-                .set(VariableLengthKey(key.serialize().into_owned()), value)
-                .map(|_| ()),
-        }
-    }
-
     fn get_<Q, F, V2>(&self, key: &Q, c: F) -> Option<V2>
     where
         K: Borrow<Q>,
@@ -200,6 +194,20 @@ where
             StoreImpl::FixedKey(store) => {
                 store.get_convert(key.serialize_fixed_size().unwrap().borrow(), c)
             }
+        }
+    }
+
+    fn set_(&self, key: K, value: Vec<u8>) -> Result<()> {
+        match &self.store {
+            StoreImpl::FixedKey(store) => store
+                .set(
+                    FixedLengthKey64Bit(key.serialize_fixed_size().unwrap()),
+                    value,
+                )
+                .map(|_| ()),
+            StoreImpl::VariableKey(store) => store
+                .set(VariableLengthKey(key.serialize().into_owned()), value)
+                .map(|_| ()),
         }
     }
 }
@@ -331,6 +339,71 @@ impl<K, V> std::fmt::Debug for PersistentKeyValueStore<K, V> {
     }
 }
 
+/// Implement IntoIterator for PersistentKeyValueStore and for &PersistentKeyValueStore
+/// using the underlying store's implementation, encoding/decoding keys and values as needed.
+impl<K, V> IntoIterator for PersistentKeyValueStore<K, V>
+where
+    K: Deserializable + Serializable,
+    V: Deserializable + Serializable,
+{
+    type Item = (K, V);
+    // Until we can use impl Trait in associated types, erasing iterator type avoids
+    // some boilerplate.
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'static>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.store {
+            StoreImpl::FixedKey(store) => Box::new(
+                store
+                    .into_iter()
+                    .map(|(k, v)| (K::from_bytes(&k.0), V::from_bytes(&v))),
+            ) as Box<dyn Iterator<Item = Self::Item>>,
+            StoreImpl::VariableKey(store) => Box::new(
+                store
+                    .into_iter()
+                    .map(|(k, v)| (K::from_bytes(&k.0[..]), V::from_bytes(&v))),
+            ) as Box<dyn Iterator<Item = Self::Item>>,
+        }
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a PersistentKeyValueStore<K, V>
+where
+    K: Deserializable + Serializable,
+    V: Deserializable + Serializable,
+{
+    type Item = (K, V);
+    // Until we can use impl Trait in associated types, erasing iterator type avoids
+    // some boilerplate.
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.store {
+            StoreImpl::FixedKey(ref store) => Box::new(
+                store
+                    .into_iter()
+                    .map(|(k, v)| (K::from_bytes(&k.0), V::from_bytes(&v))),
+            ) as Box<dyn Iterator<Item = Self::Item>>,
+            StoreImpl::VariableKey(ref store) => Box::new(
+                store
+                    .into_iter()
+                    .map(|(k, v)| (K::from_bytes(&k.0[..]), V::from_bytes(&v))),
+            )
+                as Box<dyn Iterator<Item = Self::Item>>,
+        }
+    }
+}
+
+impl<K, V> PersistentKeyValueStore<K, V>
+where
+    K: Deserializable + Serializable,
+    V: Deserializable + Serializable,
+{
+    pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = (K, V)> + 'a> {
+        <&Self as IntoIterator>::into_iter(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +461,36 @@ mod tests {
             format!("{store:?}"),
             "PersistentKeyValueStore(1 elements, 2 KiB total size)"
         );
+    }
+
+    #[test]
+    fn into_iter() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store: PersistentKeyValueStore<String, String> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+        store.set("foo", "1").unwrap();
+        store.set("bar", "2").unwrap();
+        let mut iter = store.into_iter();
+        assert_eq!(iter.next(), Some(("foo".to_string(), "1".to_string())));
+        assert_eq!(iter.next(), Some(("bar".to_string(), "2".to_string())));
+        assert_eq!(iter.next(), None);
+
+        // into_iter() consumes the store instance but not the on-disk data.
+        let store: PersistentKeyValueStore<String, String> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+        assert_eq!(store.get("foo"), Some("1".to_string()));
+    }
+
+    #[test]
+    fn ref_iter() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store: PersistentKeyValueStore<String, String> =
+            PersistentKeyValueStore::new(tmp_dir.path(), Config::default()).unwrap();
+        store.set("foo", "1").unwrap();
+        store.set("bar", "2").unwrap();
+        let mut iter = (&store).iter();
+        assert_eq!(iter.next(), Some(("foo".to_string(), "1".to_string())));
+        assert_eq!(iter.next(), Some(("bar".to_string(), "2".to_string())));
+        assert_eq!(iter.next(), None);
     }
 }

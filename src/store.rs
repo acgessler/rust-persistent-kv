@@ -1,5 +1,5 @@
 use std::{
-    borrow::Borrow,
+    borrow::{Borrow, Cow},
     cmp::{max, min},
     collections::HashMap,
     error::Error,
@@ -124,6 +124,10 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
             .map_err(|e| format!("Failed to restore prior snapshots and write ahead log: {e}"))?;
         self_.start_snapshot_writer_thread_();
         Ok(self_)
+    }
+
+    pub fn iter(&self) -> StoreIter<'_, TKey> {
+        <&Self as IntoIterator>::into_iter(self)
     }
 
     /// Returns (number of entries, size in bytes)
@@ -563,6 +567,70 @@ impl<TKey: KeyAdapter, TSS: SnapshotSet + 'static> Store<TKey, TSS> {
     }
 }
 
+type BucketIter<TKey> = <Vec<(TKey, Vec<u8>)> as IntoIterator>::IntoIter;
+
+pub struct StoreIter<'a, TKey: KeyAdapter> {
+    bucket_idx: usize,
+    all_buckets: Cow<'a, Vec<Bucket<TKey>>>,
+    within_bucket_iter: Option<BucketIter<TKey>>,
+}
+
+impl<TKey: KeyAdapter> Iterator for StoreIter<'_, TKey> {
+    type Item = (TKey, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ref mut within_bucket_iter) = self.within_bucket_iter {
+                if let Some((k, v)) = within_bucket_iter.next() {
+                    return Some((k, v));
+                } else {
+                    self.bucket_idx += 1;
+                }
+            }
+            if self.bucket_idx >= self.all_buckets.len() {
+                return None;
+            }
+            let bucket = &self.all_buckets[self.bucket_idx];
+            let data = bucket.data.read().unwrap(); // Full bucket copy.
+            let bucket_copy = data
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<(TKey, Vec<u8>)>>();
+            self.within_bucket_iter = Some(bucket_copy.into_iter());
+        }
+    }
+}
+
+impl<TKey: KeyAdapter, TSS: SnapshotSet> IntoIterator for Store<TKey, TSS> {
+    type Item = (TKey, Vec<u8>);
+    type IntoIter = StoreIter<'static, TKey>;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        // Must complete all pending snapshots before consuming the store.
+        self.stop_snapshot_writer_thread_();
+        StoreIter {
+            bucket_idx: 0,
+            all_buckets: Cow::Owned(std::mem::take(&mut self.buckets)),
+            within_bucket_iter: None,
+        }
+    }
+}
+
+impl<'a, TKey: KeyAdapter, TSS: SnapshotSet> IntoIterator for &'a Store<TKey, TSS> {
+    type Item = (TKey, Vec<u8>);
+    type IntoIter = StoreIter<'a, TKey>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        StoreIter {
+            bucket_idx: 0,
+            all_buckets: Cow::Borrowed(&self.buckets),
+            within_bucket_iter: None,
+        }
+    }
+}
+
+// No &mut iterator since insertion is fallible.
+
 #[cfg(test)]
 mod tests {
     use std::{fs::File, path::Path};
@@ -745,5 +813,55 @@ mod tests {
                 < file_length_in_bytes(&snapshot_set.snapshots[1].shard_paths[0])
         );
         assert!(file_length_in_bytes(&snapshot_set.snapshots[2].shard_paths[0]) > 0);
+    }
+
+    #[test]
+    fn into_iter() {
+        let tmp_dir = TempDir::new().unwrap();
+
+        let store = create_store(&tmp_dir);
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .unwrap();
+        let mut iter = store.into_iter();
+        assert_eq!(
+            iter.next(),
+            Some((VariableLengthKey(b"foo".to_vec()), b"1".to_vec()))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((VariableLengthKey(b"bar".to_vec()), b"2".to_vec()))
+        );
+        assert_eq!(iter.next(), None);
+
+        // into_iter() consumes the store but retains the data on disk.
+        let store = create_store(&tmp_dir);
+        assert_eq!(store.get(b"foo"), Some(b"1".to_vec()));
+    }
+
+    #[test]
+    fn ref_iter() {
+        let tmp_dir = TempDir::new().unwrap();
+
+        let store = create_store(&tmp_dir);
+        store
+            .set(VariableLengthKey(b"foo".to_vec()), b"1".to_vec())
+            .unwrap();
+        store
+            .set(VariableLengthKey(b"bar".to_vec()), b"2".to_vec())
+            .unwrap();
+        let mut iter = store.iter();
+        assert_eq!(
+            iter.next(),
+            Some((VariableLengthKey(b"foo".to_vec()), b"1".to_vec()))
+        );
+        assert_eq!(
+            iter.next(),
+            Some((VariableLengthKey(b"bar".to_vec()), b"2".to_vec()))
+        );
+        assert_eq!(iter.next(), None);
     }
 }

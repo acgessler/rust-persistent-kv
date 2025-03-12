@@ -1,5 +1,9 @@
 # Rust Persistent Key-Value Store
 
+[![Crates.io](https://img.shields.io/crates/v/persistent-kv.svg)](https://crates.io/crates/persistent-kv)
+[![Documentation](https://docs.rs/persistent-kv/badge.svg)](https://docs.rs/persistent-kv/)
+[![Dependency status](https://deps.rs/repo/github/acgessler/rust-persistent-kv/status.svg)](https://deps.rs/repo/github/acgessler/rust-persistent-kv)
+
 This project is a simple implementation of a persistent, unordered key-value store in Rust.
 This is intended as building block for applications that need all of _{concurrent reads and
 writes, ultra low latency, high durability}_ and meet all of _{data fits into RAM, keys are

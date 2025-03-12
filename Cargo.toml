@@ -1,6 +1,6 @@
 [package]
 name = "persistent-kv"
-version = "1.0.0"
+version = "1.0.1-alpha"
 edition = "2021"
 description = "Persistent key-value store"
 authors = ["Alexander Gessler <alexander.gessler@gmx.net>"]

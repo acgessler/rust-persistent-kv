@@ -14,7 +14,7 @@ exclude = [".*/", ".*"]
 
 [dependencies]
 prost = "0.13"
-regex = "1.1"
+regex = "1.5"
 fs2 = "0.4.3"
 
 [dev-dependencies]

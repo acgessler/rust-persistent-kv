@@ -14,8 +14,12 @@ exclude = [".*/", ".*"]
 
 [dependencies]
 prost = "0.13"
-regex = "1.5"
 fs2 = "0.4.3"
+
+[dependencies.regex]
+version = "1.11"
+default-features = false
+features = ["std"]
 
 [dev-dependencies]
 tempfile = "3.2"

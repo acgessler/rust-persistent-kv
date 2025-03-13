@@ -179,7 +179,8 @@ impl FileSnapshotSet {
 
     fn parse_snapshot_filename_(path: &Path) -> Option<(SnapshotOrdinal, u64, u64, SnapshotType)> {
         let filename = path.file_name().unwrap().to_str().unwrap();
-        let re = Regex::new(r"^snapshot_(\d+)_(\d+)-of-(\d+)_(diff|full|pending)\.bin$").unwrap();
+        let re = Regex::new(r"^snapshot_([0-9]+)_([0-9]+)-of-([0-9]+)_(diff|full|pending)\.bin$")
+            .unwrap();
         let captures = re.captures(filename)?;
         let ordinal = SnapshotOrdinal(captures[1].parse().unwrap());
         let shard = captures[2].parse().unwrap();

@@ -1,8 +1,8 @@
-//! Unordered key-value store with all data held in memory but also persisted to disk
+//! Unordered key-value store with all data held in memory but also reliably persisted to disk
 //! for durability.
 //!
 //! The store is designed to be used as a building block for (distributed) systems that require
-//! a high-throughput, ultra low latency, unordered key-value store with persistence guarantee
+//! a high-throughput, ultra low latency, unordered key-value store with persistence guarantees
 //! and can shard the data so that it always fits into the RAM of one machine.
 //!
 //! # Design goals
@@ -12,7 +12,7 @@
 //!  - Tunable write throughput / persistence guarantee trade-off
 //!  - Maximize block device throughput and exploit I/O parallelism if supported by OS and hardware
 //!  - Amortized memory and disk usage is O(number of keys), <10% overhead over payload size (e.g.
-//!    no spikes during snapshotting)
+//!    no spikes during snapshotting) to allow deployment close to machine memory limits.
 //!  - Support for both fixed-size and variable-size keys and values
 //!
 //! A good mental model is "Hashmap that keeps its contents between program runs". If more

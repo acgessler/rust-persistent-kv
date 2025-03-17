@@ -4,9 +4,9 @@
 [![Documentation](https://docs.rs/persistent-kv/badge.svg)](https://docs.rs/persistent-kv/)
 [![Dependency status](https://deps.rs/repo/github/acgessler/rust-persistent-kv/status.svg)](https://deps.rs/repo/github/acgessler/rust-persistent-kv)
 
-This project is a simple implementation of a persistent, unordered key-value store in Rust.
-This is intended as building block for applications that need all of _{concurrent reads and
-writes, ultra low latency, high durability}_ and meet all of _{data fits into RAM, keys are
+This project is a simple implementation of a persistent, fault-tolerant, unordered key-value
+store in Rust. This is intended as building block for applications that need all of _{concurrent reads and
+writes, ultra low latency, high durability, crash safety}_ and meet all of _{data fits into RAM, keys are
 unordered, single process}_. Basically a concurrent hashmap that keeps its contents!
 
 Under the hood, the store implements persistence via a write-ahead log that is periodically
@@ -62,6 +62,14 @@ let store: PersistentKeyValueStore<String, Foo> = ...
 store.set_proto("foo", Foo {bar: 42})?;
 store.get_proto("foo")?; // Returns: Some(Foo {bar: 42}))
 ```
+
+### Use with Tokio
+
+Use [`tokio::task::spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) to
+wrap calls to `set(key)` or `unset(key)`. The store provides no native async functionality as the
+I/O calls end up being blocking anyway and message sequencing would further reduce the benefits.
+Due to the way how locks are held internally, using spawn_blocking() with concurrent set calls is
+efficient and approaches the hardware's I/O parallelism.
 
 ### Configuration
 
